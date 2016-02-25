@@ -8,3 +8,5 @@ Click for demo -> http://erichlof.github.io/THREE.js-PathTracing-Renderer/ThreeJ
 * Add simple FPS-style flying controls for desktop and mobile.
 * Instead of setting up meshes with Phong Material, use Three.js's new Standard Material (physically-based parameters).
 * Allow automatic adjustable resolution when the camera moves.  Lower resolution while moving, higher resolution while still - so that the image converges to a high-quality render while static.  
+
+This project is in the early Alpha stage. More features, examples, coming soon...
