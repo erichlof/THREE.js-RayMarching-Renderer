@@ -1,0 +1,1128 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js PathTracing Renderer</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1">
+		<style>
+			
+			body {
+				color: #ffffff;
+				font-family:Monospace;
+				font-size:13px;
+				text-align:center;
+				font-weight: bold;
+
+				background-color: #000000;
+				margin: 0px;
+				overflow: hidden;
+			}
+
+			#info {
+				position: absolute;
+				top: 0px; width: 100%;
+				padding: 5px;
+			}
+
+			a {
+
+				color: #ffffff;
+			}
+
+			#oldie a { color:#da0 }
+		</style>
+	</head>
+	<body>
+
+		<div id="container"></div>
+		<div id="info"> three.js PathTracing Renderer</div>
+
+		<!-- for Debugging -->
+		<!-- <script src="js/three-r74.js"></script> -->
+		
+		<!-- for Release -->
+		<script src="js/three-r74.min.js"></script>
+		
+		<script src="js/Detector.js"></script>
+		<script src="js/stats.min.js"></script>
+		
+		
+		<script id="screenVertexShader" type="x-shader/x-vertex">
+
+varying vec2 vUv;
+
+void main() {
+
+	vUv = uv;
+	gl_Position = vec4( position, 1.0 );
+
+}
+
+		</script>
+		
+		<script id="screenFragmentShader" type="x-shader/x-fragment">
+		
+precision highp float;
+varying vec2 vUv;
+uniform sampler2D tTexture0;
+//uniform sampler2D tTexture1;
+
+void main() {
+
+	//gl_FragColor = mix( texture2D(tTexture0, vUv), texture2D(tTexture1, vUv), 0.5 );
+	gl_FragColor = texture2D(tTexture0, vUv);
+	
+}
+		
+		</script>
+
+		<script id="renderToTextureVertexShader" type="x-shader/x-vertex">
+		
+varying vec2 vUv;
+
+void main()
+{
+	vUv = uv;
+	gl_Position = vec4( position, 1.0 );
+}
+
+		</script>
+		
+		<script id="renderToTextureFragmentShader" type="x-shader/x-fragment">
+				
+precision highp float;
+
+uniform vec2 resolution;
+uniform float time;
+uniform float uULen;
+uniform float uVLen;
+
+uniform mat3 uCheckeredMaterialMatrix;
+uniform mat3 uMirrorMaterialMatrix;
+uniform mat3 uBlueMaterialMatrix;
+uniform mat3 uWhiteMaterialMatrix;
+uniform mat3 uGlassMaterialMatrix;
+
+uniform mat4 uBoxMeshMatrix;
+uniform mat4 uCameraMatrix;
+uniform mat4 uLightMatrix[3];
+uniform mat4 uSphereMeshMatrix[4];
+
+uniform sampler2D tPreviousTexture;
+varying vec2 vUv;
+
+
+#define PI		  	  3.14159265359
+#define MAX_ITERATIONS	  	  200
+#define MAX_REFLECTION_ITERATIONS 60
+#define MAX_SHADOW_STEPS  	  45
+#define EPSILON           	  0.0001
+#define MAX_RENDER_DISTANCE  	  50.0
+
+
+// globals
+vec3 lightPos[3];
+vec3 light00Color = vec3(0.0);
+vec3 light01Color = vec3(0.0);
+vec3 light02Color = vec3(0.0);
+
+// GLSL rand()-type hash functions
+float hash1( float seed )
+{
+    return fract( sin(seed) * 98765.4321 );
+}
+
+float hash2( vec2 seed )
+{
+    return fract( sin( dot( seed, vec2(15.79, 81.93) ) ) * 8765.4321 );
+}
+
+
+// primitive distance functions
+float distInfiniteGroundPlane( vec3 pos )
+{
+	return pos.y;
+}
+
+float distPlane( vec3 pos, vec3 normal, float distFromOrigin )
+{
+	return dot(pos, normal) + distFromOrigin;
+}
+
+float distSphere( vec3 pos, float radius )
+{
+    	return length( pos ) - radius;
+}
+
+float distBox( vec3 pos, vec3 scale )
+{
+    	return length( max( abs( pos ) - scale, vec3( 0.0 ) ) );
+}
+
+// distance field operations
+float opUnion( float dist1, float dist2 )
+{
+    return min( dist1, dist2 );
+}
+
+float opSubtraction( float dist1, float dist2 )
+{
+    return max( -dist1, dist2 );
+}
+
+float opIntersection( float dist1, float dist2 )
+{
+    return max( dist1, dist2 );
+}
+
+// checkerBoard / chessBoard pattern
+float chessBoard( vec3 pos, float scale )
+{
+    pos = floor( pos * scale ); 
+    return mod( pos.x+pos.z, 2.0 );
+}
+
+// closest object
+vec2 getDistToNearestObj( vec3 pos, bool checkForLights ) 
+{   
+	vec3 spherePos;
+	vec3 boxPos;
+	float dist, d1, d2, d3, d4;
+	float testDist, closestDist;
+	float materialID = -0.5;
+	
+    	// floor
+    	//testDist = distPlane( pos, vec3(0,1,0), 0.0 );
+	testDist = distInfiniteGroundPlane( pos );
+	closestDist = testDist;
+	
+	if (testDist <= 0.1)
+	{
+		materialID = 0.0;
+        }
+	
+	// lights
+	if (checkForLights)
+	{
+		testDist = distSphere(pos - lightPos[0], 0.1);
+		if (testDist < closestDist) {
+			closestDist = testDist;
+			materialID = -1.0;
+		}
+		testDist = distSphere(pos - lightPos[1], 0.1);
+		if (testDist < closestDist) {
+			closestDist = testDist;
+			materialID = -2.0;
+		}
+		testDist = distSphere(pos - lightPos[2], 0.1);
+		if (testDist < closestDist) {
+			closestDist = testDist;
+			materialID = -3.0;
+		}
+	}
+	
+    	// spheres
+	// warp tracing sphere's position (pos) to sphereMesh's transform
+    	spherePos = vec3( uSphereMeshMatrix[0] * vec4(pos,1.0) );
+	testDist = distSphere(spherePos, 1.0);
+	if (testDist < closestDist) {
+		closestDist = testDist;
+		materialID = 3.0;
+	}
+	spherePos = vec3( uSphereMeshMatrix[1] * vec4(pos,1.0) );
+	testDist = distSphere(spherePos, 0.5);
+	if (testDist < closestDist) {
+		closestDist = testDist;
+		materialID = 2.0;
+	}
+	spherePos = vec3( uSphereMeshMatrix[2] * vec4(pos,1.0) );
+	testDist = distSphere(spherePos, 0.5);
+	if (testDist < closestDist) {
+		closestDist = testDist;
+		materialID = 2.0;
+	}
+	spherePos = vec3( uSphereMeshMatrix[3] * vec4(pos,1.0) );
+	testDist = distSphere(spherePos, 1.0);
+	if (testDist < closestDist) {
+		closestDist = testDist;
+		materialID = 4.0;
+	}
+	
+    	
+    	// warp tracing sphere's position (pos) to boxMesh's transform
+    	boxPos = vec3( uBoxMeshMatrix * vec4(pos,1.0) );
+	
+    	// boxes
+    	d1 = distBox( boxPos, vec3(1.0) );
+    	d2 = distBox( boxPos - vec3( sin(time)*1.5, 0.5, sin(time)*1.5 ), vec3(0.6,0.2,0.6) );
+	//dist = min( dist, opUnion(d1,d2) );
+	d3 = distSphere(boxPos, abs(sin(time*0.5)) * 1.6 );
+        dist = opSubtraction(d3,d1);
+        testDist = min( dist, d2 );
+	if (testDist < closestDist) {
+		closestDist = testDist;
+		materialID = 1.0;
+	}
+   	
+	return vec2(closestDist, materialID);
+}
+
+
+//Surface normal at the current position
+vec3 computeSurfaceNormal( vec3 p )
+{
+    vec3 off = vec3(0.01, 0, 0);
+    return normalize
+    ( 
+        vec3
+        (
+            getDistToNearestObj(p + off.xyz, false).x - getDistToNearestObj(p - off.xyz, false).x,
+            getDistToNearestObj(p + off.zxy, false).x - getDistToNearestObj(p - off.zxy, false).x,
+            getDistToNearestObj(p + off.yzx, false).x - getDistToNearestObj(p - off.yzx, false).x
+        )
+    );
+}
+
+mat3 getMaterialMatrix ( float materialID )
+{
+	mat3 currentMaterialMatrix;
+	
+     	     if (materialID == 0.0) currentMaterialMatrix = uCheckeredMaterialMatrix;
+	else if (materialID == 1.0) currentMaterialMatrix = uBlueMaterialMatrix;
+	else if (materialID == 2.0) currentMaterialMatrix = uMirrorMaterialMatrix;
+	else if (materialID == 3.0) currentMaterialMatrix = uWhiteMaterialMatrix;
+	else if (materialID == 4.0) currentMaterialMatrix = uGlassMaterialMatrix;
+	
+	return currentMaterialMatrix;
+}
+
+float calcAO( vec3 pos, vec3 nor )
+{
+	float occ = 0.0;
+    	float sca = 1.0;
+    	for( int i=0; i<3; i++ )
+    	{
+        	float hr = 0.01 + 0.12*float(i)/4.0;
+        	vec3 aopos =  nor * hr + pos;
+        	float dd = getDistToNearestObj( aopos, false ).x;
+        	occ += -(dd-hr)*sca;
+        	sca *= 0.95;
+    	}
+    	return clamp( 1.0 - 3.0*occ, 0.5, 1.0 );    
+}
+
+float softShadow( vec3 ro, vec3 rd )
+{
+	float res = 1.0;
+    	float t = 0.03;//0.02
+    	for( int i=0; i<MAX_SHADOW_STEPS; i++ )
+    	{
+		float h = getDistToNearestObj( ro + rd*t, false ).x;
+		//if (h < EPSILON) break;
+		res = min( res, h*50.0 / t );
+		t += h;
+		//if (t > 20.0) break;
+    	}
+    	return clamp( res, 0.1, 1.0 );
+	//return 1.0;
+}
+
+
+vec3 radiance (
+	vec3 n,		// macro surface normal
+	vec3 l,		// direction from vertex to light
+	vec3 v,		// direction from vertex to view
+	float m,	// roughness
+	vec3 cdiff,	// diffuse  reflectance
+	vec3 cspec,	// specular reflectance : F0
+	vec3 clight	// light intensity
+) 
+{
+	// half vector
+	vec3 h = normalize( l + v );
+	
+	// dot
+	float dot_n_h = max( abs( dot( n, h ) ), 0.001 );
+	float dot_n_v = max( abs( dot( n, v ) ), 0.001 );
+	float dot_n_l = max( abs( dot( n, l ) ), 0.001 );
+	float dot_h_v = max( abs( dot( h, v ) ), 0.001 ); // dot_h_v == dot_h_l
+	
+	// Geometric Term
+
+    	// Cook-Torrance
+    	//          2 * ( N dot H )( N dot L )    2 * ( N dot H )( N dot V )
+	// min( 1, ----------------------------, ---------------------------- )
+	//                 ( H dot V )                   ( H dot V )
+	float g = 2.0 * dot_n_h / dot_h_v;
+	float G = min( min( dot_n_v, dot_n_l ) * g, 1.0 );
+
+    
+    	// Normal Distribution Function ( cancel 1 / pi )
+
+ 	// Beckmann distribution
+	//         ( N dot H )^2 - 1
+	//  exp( ----------------------- )
+	//         ( N dot H )^2 * m^2
+	// --------------------------------
+	//         ( N dot H )^4 * m^2
+    	float sq_nh   = dot_n_h * dot_n_h;
+	float sq_nh_m = sq_nh * ( m * m );
+	float D = exp( ( sq_nh - 1.0 ) / sq_nh_m ) / ( sq_nh * sq_nh_m );
+
+	// Specular Fresnel Term : Schlick approximation
+	// F0 + ( 1 - F0 ) * ( 1 - ( H dot V ) )^5
+	vec3 Fspec = cspec + ( 1.0  - cspec ) * pow( 1.0 - dot_h_v, 5.0 );
+	
+	// Diffuse Fresnel Term : violates reciprocity...
+	// F0 + ( 1 - F0 ) * ( 1 - ( N dot L ) )^5
+	vec3 Fdiff = cspec + ( 1.0  - cspec ) * pow( 1.0 - dot_n_l, 5.0 );
+	
+    
+	// Cook-Torrance BRDF
+	//          D * F * G
+	// ---------------------------
+	//  4 * ( N dot V )( N dot L )
+	vec3 brdf_spec = Fspec * D * G / ( dot_n_v * dot_n_l * 4.0 );
+	
+	// Lambertian BRDF ( cancel 1 / pi )
+	vec3 brdf_diff = cdiff * ( 1.0 - Fdiff );
+	
+	// Punctual Light Source ( cancel pi )
+	return ( brdf_spec + brdf_diff ) * clight * dot_n_l;	
+}
+
+// shading
+vec3 shading( vec3 p, vec3 n, vec3 eye, mat3 materialMatrix , float materialID, bool doShadows )
+{
+	// material
+	float roughness = materialMatrix[1][0];
+	vec3 cdiff = vec3( materialMatrix[0][0], materialMatrix[0][1], materialMatrix[0][2] );
+	vec3 cspec = vec3(0.6);
+
+	vec3 ve = normalize( eye - p );
+
+	vec3 final = vec3( 0.0 );
+	
+	// do checkerBoard pattern on floor
+	if ( materialID == 0.0 )
+	{
+		// infinite plane
+		float pattern = clamp( chessBoard(p, 0.5), 0.3, 1.0 );
+		
+		// for a bounded plane
+		//if ( abs(pos.x) > 8.0 || abs(pos.z) > 8.0 )
+		//	pattern = 0.0;
+    		//else pattern = clamp( chessBoard(p, 0.5), 0.3, 1.0 );
+		
+		cdiff *= pattern;
+	}
+
+	
+	// light 0
+	{
+		vec3 vl = normalize( lightPos[0] - p );
+		
+		float shadow = 1.0;
+		if (doShadows) 
+			shadow = softShadow( p, vl );
+
+		if (shadow > 0.9)
+			final += radiance( n, vl, ve, roughness, cdiff, cspec, light00Color );
+		else 
+			final += radiance( n, vl, ve, roughness, cdiff, cspec, light00Color * shadow );
+	}
+	
+	// light 1
+	{
+		vec3 vl = normalize( lightPos[1] - p );
+		
+		float shadow = 1.0;
+		if (doShadows) 
+			shadow = softShadow( p, vl );
+
+		if (shadow > 0.9)
+			final += radiance( n, vl, ve, roughness, cdiff, cspec, light01Color );
+		else
+			final += radiance( n, vl, ve, roughness, cdiff, cspec, light01Color * shadow );
+	}
+	
+	// light 2
+	{
+		vec3 vl = normalize( lightPos[2] - p );
+		
+		float shadow = 1.0;
+		if (doShadows)
+			shadow = softShadow( p, vl );
+
+		if (shadow > 0.9)
+			final += radiance( n, vl, ve, roughness, cdiff, cspec, light02Color );
+		else
+			final += radiance( n, vl, ve, roughness, cdiff, cspec, light02Color * shadow );
+	}
+
+	return final;
+}
+
+
+void main( void )
+{
+
+	mat3 materialMatrix;
+	vec2 camUV = (gl_FragCoord.xy/resolution.xy) * 2.0 - 1.0;
+	vec3 camPos = vec3(uCameraMatrix[3][0], uCameraMatrix[3][1], uCameraMatrix[3][2]);
+	
+    	vec3 camRight   = ( vec3( uCameraMatrix[0][0],  uCameraMatrix[0][1],  uCameraMatrix[0][2]) );
+    	vec3 camUp      = ( vec3( uCameraMatrix[1][0],  uCameraMatrix[1][1],  uCameraMatrix[1][2]) );
+	vec3 camForward = ( vec3(-uCameraMatrix[2][0], -uCameraMatrix[2][1], -uCameraMatrix[2][2]) );
+	
+	
+    	vec3 rayDir = normalize(camUV.x * camRight * uULen + camUV.y * camUp * uVLen + camForward);
+	rayDir += vec3( hash1(rayDir.x), hash1(rayDir.y), hash1(rayDir.z) ) * 0.005;
+	//camPos += (vec3( hash1(time), hash1(time+3.0), hash1(time+7.0) ) * 0.01);
+	
+	vec3 normal = vec3( 0.0 );
+	vec3 reflectedPos = vec3(0.0);
+	vec3 reflectionNormal = vec3( 0.0 );
+	vec3 reflectDir = vec3( 0.0 );
+	vec3 reflectedColor = vec3( 0.0 );
+	vec3 refractDir = vec3( 0.0 );
+	vec3 refractedColor = vec3( 0.0 );
+	vec3 linearColor = vec3( 0.0 );
+	vec3 finalColor = vec3( 0.0 );
+	
+	lightPos[0] = vec3(uLightMatrix[0][0][0], uLightMatrix[0][0][1], uLightMatrix[0][0][2]);
+	lightPos[1] = vec3(uLightMatrix[1][0][0], uLightMatrix[1][0][1], uLightMatrix[1][0][2]);
+	lightPos[2] = vec3(uLightMatrix[2][0][0], uLightMatrix[2][0][1], uLightMatrix[2][0][2]);
+	
+	light00Color = vec3( uLightMatrix[0][1][0], uLightMatrix[0][1][1], uLightMatrix[0][1][2] );
+    	light01Color = vec3( uLightMatrix[1][1][0], uLightMatrix[1][1][1], uLightMatrix[1][1][2] );
+	light02Color = vec3( uLightMatrix[2][1][0], uLightMatrix[2][1][1], uLightMatrix[2][1][2] );
+	
+	float reflectivity = 0.0;
+	float opacity = 0.0;
+	float refractionRatio = 0.0;
+	float distFromCamera = 0.0;
+	float reflectedDistFromCamera = 0.0;
+	
+	// raymarching
+	float delta = 0.1;
+	vec2 res = vec2( 0.0 );
+
+	for( int i = 0; i < MAX_ITERATIONS; i++ ) 
+	{
+		res = getDistToNearestObj( camPos + rayDir * delta, true );
+		if ( res.x < EPSILON || delta > MAX_RENDER_DISTANCE ) break;
+		//if ( res.x < EPSILON ) break;
+		delta += res.x;
+	}
+
+    	vec3 pos = camPos + rayDir * delta;
+	
+	// get current material
+	materialMatrix = getMaterialMatrix( res.y );
+	// get material properties
+	reflectivity = materialMatrix[1][1];
+	opacity = materialMatrix[1][2];
+	refractionRatio = materialMatrix[2][0];
+	
+	// check if the ray didn't hit anything
+	distFromCamera = length( pos - camPos );
+	if ( distFromCamera > MAX_RENDER_DISTANCE )
+	{
+		linearColor = vec3(0.0);
+		res.y = -5.0;
+	}
+	
+	// check if we hit a light source
+	else if ( res.y == -1.0 ) linearColor = light00Color;
+	else if ( res.y == -2.0 ) linearColor = light01Color;
+	else if ( res.y == -3.0 ) linearColor = light02Color;
+	
+	
+	// if we didn't hit a light source and res.y is positive, then shade this hitpoint
+	if ( res.y >= 0.0 )
+	{
+		
+		// compute initial linearColor
+    		
+		normal = computeSurfaceNormal( pos );
+    					
+		///linearColor = shade( pos, rayDir, normal, materialMatrix, res.y, true );
+		linearColor = shading( pos, normal, camPos, materialMatrix, res.y, true );
+		
+		// REFLECTION
+		///if (reflectivity > 0.0)
+		{
+			// compute reflected color
+			reflectDir = reflect(rayDir, normal);
+			// reflection raymarching
+			delta = 0.01;
+			res = vec2( 0.0 );
+	
+    			for( int i = 0; i < MAX_REFLECTION_ITERATIONS; i++ ) 
+			{
+        			res = getDistToNearestObj( pos + reflectDir * delta, false );
+        			//if ( res.x < EPSILON || delta > MAX_RENDER_DISTANCE ) break;
+				//if ( res.x < EPSILON ) break;
+        			delta += res.x;
+    			}
+			
+			reflectedPos = pos + reflectDir * delta;
+			
+			// check if the ray didn't hit anything
+			reflectedDistFromCamera = length( reflectedPos - camPos );
+			if ( reflectedDistFromCamera > MAX_RENDER_DISTANCE )
+			{
+				reflectedColor = vec3(0.0);
+				res.y = -5.0;
+			}
+			/*
+			// check if we hit a light source
+			else if ( res.y == -1.0 ) reflectedColor = light00Color;
+			else if ( res.y == -2.0 ) reflectedColor = light01Color;
+			else if ( res.y == -3.0 ) reflectedColor = light02Color;
+			*/
+			
+			if ( res.y >= 0.0 )
+			{
+				// get current material
+				materialMatrix = getMaterialMatrix( res.y );
+
+				
+
+				reflectionNormal = computeSurfaceNormal( reflectedPos );
+
+				// add reflected color to original linearColor
+				///reflectedColor = shade( reflectedPos, reflectDir, reflectionNormal, materialMatrix, res.y, false );
+				reflectedColor = shading( reflectedPos, reflectionNormal, pos, materialMatrix, res.y, false  );
+			}
+			
+			
+			linearColor += reflectedColor * reflectivity;
+		
+		}
+		
+		
+		// REFRACTION
+		if (refractionRatio != 0.98)
+		{
+		
+			// we are entering the glass material
+			refractDir = refract(rayDir, normal, refractionRatio);
+			
+			delta = 0.01;
+			res = vec2( 0.0 );
+			
+			// trace until we hit other side of object
+			for( int i = 0; i < MAX_REFLECTION_ITERATIONS; i++ ) 
+			{
+        			res = getDistToNearestObj( pos + refractDir * delta, false );
+				delta -= res.x;
+				//if ( -res.x > -EPSILON ) break;
+        			
+    			}
+			
+			// we are now exiting the glass material
+			reflectedPos = pos + refractDir * delta;	
+			reflectionNormal = computeSurfaceNormal( reflectedPos );
+			
+			refractDir = refract(refractDir, -reflectionNormal, 1.0 / refractionRatio);
+			
+			delta = 0.01;
+			res = vec2( 0.0 );
+	
+			// trace until we hit another world object and get its color
+    			for( int i = 0; i < MAX_REFLECTION_ITERATIONS; i++ ) 
+			{
+        			res = getDistToNearestObj( reflectedPos + refractDir * delta, false );
+				//if ( res.x < EPSILON || delta > MAX_RENDER_DISTANCE ) break;
+				//if ( res.x < EPSILON ) break;
+				delta += res.x;
+    			}
+			
+			reflectedPos = reflectedPos + refractDir * delta;
+			
+			// check if the ray didn't hit anything
+			reflectedDistFromCamera = length( reflectedPos - camPos );
+			if ( reflectedDistFromCamera > MAX_RENDER_DISTANCE )
+			{
+				refractedColor = vec3(0.0);
+				res.y = -5.0;
+			}
+			/*
+			// check if we hit a light source
+			else if ( res.y == -1.0 ) refractedColor = light00Color;
+			else if ( res.y == -2.0 ) refractedColor = light01Color;
+			else if ( res.y == -3.0 ) refractedColor = light02Color;
+			*/
+			
+			if ( res.y >= 0.0 )
+			{
+				// get current material
+				materialMatrix = getMaterialMatrix( res.y );
+
+				reflectionNormal = computeSurfaceNormal( reflectedPos );
+
+				// add reflected color to original linearColor
+				///refractedColor = shade( reflectedPos, refractDir, reflectionNormal, materialMatrix, res.y, false );
+				refractedColor = shading( reflectedPos, reflectionNormal, pos, materialMatrix, res.y, false );
+			}
+			
+			
+			linearColor += refractedColor;// * (1.0 - opacity);	
+		}
+			
+	}
+	
+	//linearColor = clamp( linearColor, 0.0, 1.0 );
+	
+	// post processing
+	
+	// global color intensity is attenuated by distance from camera
+	///linearColor = mix( linearColor, vec3(0.0,0.0,0.0), 1.0 - exp2(-0.1 * (distFromCamera) ) );
+	
+	// Gamma correction
+	finalColor = sqrt( linearColor ); 
+	//finalColor = pow( linearColor, vec3( 1.0 / screenGamma ) );
+		
+    	gl_FragColor = mix( texture2D(tPreviousTexture, vUv), vec4(finalColor, 1.0) * 0.8, 0.1 );
+}
+
+		</script>
+		
+		
+		<script>
+
+			if ( ! Detector.webgl ) Detector.addGetWebGLMessage();
+
+			var container, stats;
+			var rttGeometry, rttMaterial, rttMesh; // rtt = render to texture
+			var screenGeometry, screenMaterial, screenMesh;
+			var groundGeometry, checkeredMaterial, groundMesh;
+			var boxGeometry, blueMaterial, boxMesh;
+			var sphereGeometry, mirrorMaterial, whiteMaterial, glassMaterial;
+			var sphereMesh = [];
+			var pointLight00, pointLight01, pointLight02;
+			var quadCamera, rttCamera;
+			var renderer, clock;
+			var rttPathTraceTexture, rttScreenOutputTexture, sceneScreen, sceneRTT; // RTT = Render To Texture
+			var windowWidth, windowHeight;
+			var fovScale;
+			var frameTime, elapsedTime;
+			var rttUniforms;
+			var pixelRatio = 0.3;
+			var TWO_PI = Math.PI * 2;
+			var rotationalAmount = 2.0;
+			var rotationalAxis = new THREE.Vector3(0,1,0);
+			var cameraDirectionVec = new THREE.Vector3();
+			var swap = false;
+			
+			
+			init();
+			animate();
+
+			function init() {
+
+				container = document.getElementById( 'container' );
+				renderer = new THREE.WebGLRenderer();
+				//renderer.autoClear = false;
+				// 1 is full resolution, 0.5 is half, 0.25 is quarter, etc. (must be > than 0.0)
+				renderer.setPixelRatio(pixelRatio);
+				
+				container.appendChild( renderer.domElement );
+
+				stats = new Stats();
+				stats.domElement.style.position = 'absolute';
+				stats.domElement.style.top = '0px';
+				container.appendChild( stats.domElement );
+
+				
+				
+				window.addEventListener( 'resize', onWindowResize, false );
+				
+				clock = new THREE.Clock();
+				
+				sceneRTT = new THREE.Scene();
+				sceneScreen = new THREE.Scene();
+				
+				rttPathTraceTexture = new THREE.WebGLRenderTarget( window.innerWidth * pixelRatio, window.innerHeight * pixelRatio, {
+					minFilter: THREE.NearestFilter, // default THREE.LinearMipMapLinearFilter
+					magFilter: THREE.NearestFilter, // default THREE.LinearFilter
+					format: THREE.RGBFormat,
+					depthBuffer: false,
+					stencilBuffer: false
+				} );
+				
+				rttScreenOutputTexture = new THREE.WebGLRenderTarget( window.innerWidth * pixelRatio, window.innerHeight * pixelRatio, {
+					minFilter: THREE.NearestFilter, 
+					magFilter: THREE.NearestFilter, 
+					format: THREE.RGBFormat,
+					depthBuffer: false,
+					stencilBuffer: false
+				} );
+				
+				rttPathTraceTexture.texture.generateMipmaps = false;
+				rttScreenOutputTexture.texture.generateMipmaps = false;
+				
+				// quadCamera is simply the camera to help render the full screen quad (2 triangles),
+				// hence the name.  It is an Orthographic camera that sits facing the view plane, which serves as
+				// the window into our 3d world. This camera will not move or rotate for the duration of the app.
+				quadCamera = new THREE.OrthographicCamera( -1, 1, 1, -1, 0, 1 );
+				sceneScreen.add(quadCamera);
+				
+				// rttCamera is the dynamic camera 3d object that will be positioned, oriented and 
+				// constantly updated inside the 3d scene.  Its view will ultimately get passed back to the 
+				// stationary quadCamera, which renders the scene to a fullscreen quad (made up of 2 large triangles).
+				rttCamera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 1000);
+				sceneRTT.add(rttCamera);
+				//rttCamera.position.set(0,1,5);
+				//rttCamera.lookAt(new THREE.Vector3(0,0,-1));
+				
+				rttGeometry = new THREE.PlaneBufferGeometry( 2, 2 );
+
+				rttUniforms = {
+					tPreviousTexture: { type: "t", value: rttScreenOutputTexture },
+					resolution: { type: "v2", value: new THREE.Vector2() },
+					
+					time: { type: "f", value: 0.0 },
+					uULen: { type: "f", value: 1.0 },
+					uVLen: { type: "f", value: 1.0 },
+					
+					uCheckeredMaterialMatrix: { type: "m3", value: new THREE.Matrix3() },
+					uMirrorMaterialMatrix: { type: "m3", value: new THREE.Matrix3() },
+					uBlueMaterialMatrix: { type: "m3", value: new THREE.Matrix3() },
+					uWhiteMaterialMatrix: { type: "m3", value: new THREE.Matrix3() },
+					uGlassMaterialMatrix: { type: "m3", value: new THREE.Matrix3() },
+					
+					uBoxMeshMatrix: { type: "m4", value: new THREE.Matrix4() },
+					uCameraMatrix: { type: "m4", value: new THREE.Matrix4() },
+					
+					uSphereMeshMatrix: { type: "m4v", value: [] },
+					uLightMatrix: { type: "m4v", value: [] }
+				};
+			
+				rttMaterial = new THREE.ShaderMaterial( {
+					uniforms: rttUniforms,
+					vertexShader: document.getElementById( 'renderToTextureVertexShader' ).textContent,
+					fragmentShader: document.getElementById( 'renderToTextureFragmentShader' ).textContent,
+				        depthTest: false,
+                                        depthWrite: false
+                                } );
+
+				rttMesh = new THREE.Mesh( rttGeometry, rttMaterial );
+				sceneRTT.add( rttMesh );
+
+				
+				// Ground
+				groundGeometry = new THREE.PlaneBufferGeometry(1000, 1000, 1, 1);
+				checkeredMaterial = new THREE.MeshPhongMaterial( {
+					color: new THREE.Color(0.8, 0.8, 0.8), //RGB, ranging from 0.0 - 1.0
+					shininess: 1000, // medium shininess
+					//roughness: 0.4,
+					reflectivity: 0.5, // higher reflection for marble-like surface
+					opacity: 1.0,
+					refractionRatio: 0.98
+				} );
+				
+				groundMesh = new THREE.Mesh(groundGeometry, checkeredMaterial);
+				// the ground plane is initially in the X-Y plane facing the camera,
+				// therefore, we rotate the ground plane to lie flat in the X-Z plane
+				groundMesh.rotation.x = Math.PI / -2;
+				sceneRTT.add(groundMesh);
+				groundMesh.visible = false;
+				
+				rttUniforms.uCheckeredMaterialMatrix.value.elements[0] = groundMesh.material.color.r;
+				rttUniforms.uCheckeredMaterialMatrix.value.elements[1] = groundMesh.material.color.g;
+				rttUniforms.uCheckeredMaterialMatrix.value.elements[2] = groundMesh.material.color.b;
+				//rttUniforms.uCheckeredMaterialMatrix.value.elements[3] = groundMesh.material.shininess;
+				rttUniforms.uCheckeredMaterialMatrix.value.elements[3] = 0.3;//groundMesh.material.roughness;
+				rttUniforms.uCheckeredMaterialMatrix.value.elements[4] = groundMesh.material.reflectivity;
+				rttUniforms.uCheckeredMaterialMatrix.value.elements[5] = groundMesh.material.opacity;
+				rttUniforms.uCheckeredMaterialMatrix.value.elements[6] = groundMesh.material.refractionRatio;
+				
+				
+				// Boxes
+				boxGeometry = new THREE.BoxGeometry(1,1,1);
+				blueMaterial = new THREE.MeshPhongMaterial( {
+					color: new THREE.Color(0.0, 0.0, 0.5), //RGB, ranging from 0.0 - 1.0
+					shininess: 3000, // very shiny
+					//roughness: 0.4,
+					reflectivity: 0.05, // a hint of reflection in plastic material
+					opacity: 1.0,
+					refractionRatio: 0.98
+				} );
+				
+				boxMesh = new THREE.Mesh(boxGeometry, blueMaterial);
+				sceneRTT.add(boxMesh);
+				boxMesh.visible = false;
+				
+				rttUniforms.uBlueMaterialMatrix.value.elements[0] = boxMesh.material.color.r;
+				rttUniforms.uBlueMaterialMatrix.value.elements[1] = boxMesh.material.color.g;
+				rttUniforms.uBlueMaterialMatrix.value.elements[2] = boxMesh.material.color.b;
+				//rttUniforms.uBlueMaterialMatrix.value.elements[3] = boxMesh.material.shininess;
+				rttUniforms.uBlueMaterialMatrix.value.elements[3] = 0.2;//boxMesh.material.roughness;
+				rttUniforms.uBlueMaterialMatrix.value.elements[4] = boxMesh.material.reflectivity;
+				rttUniforms.uBlueMaterialMatrix.value.elements[5] = boxMesh.material.opacity;
+				rttUniforms.uBlueMaterialMatrix.value.elements[6] = boxMesh.material.refractionRatio;
+				
+				
+				// Spheres
+				mirrorMaterial = new THREE.MeshPhongMaterial( {
+					color: new THREE.Color(0.0, 0.0, 0.0), //RGB, ranging from 0.0 - 1.0
+					shininess: 4000, // extremely shiny
+					//roughness: 0.02,
+					reflectivity: 1.0, // perfect mirror, max reflectivity
+					opacity: 1.0,
+					refractionRatio: 0.98
+				} );
+				whiteMaterial = new THREE.MeshPhongMaterial( {
+					color: new THREE.Color(0.99, 0.99, 0.99), //RGB, from 0.0 - 1.0
+					shininess: 3000, // very shiny
+					//roughness: 0.1,
+					reflectivity: 0.1, // a hint of reflection in plastic material
+					opacity: 1.0,
+					refractionRatio: 0.98
+				} );
+				glassMaterial = new THREE.MeshPhongMaterial( {
+					color: new THREE.Color(0.0, 0.0, 0.0), //RGB, from 0.0 - 1.0
+					shininess: 4000, // very shiny
+					//roughness: 0.02,
+					reflectivity: 0.0, // no reflectivity for Android to work :(
+					//reflectivity: 0.03, // only slightly reflective
+					opacity: 0.0, // 0.01 almost fully transparent
+					refractionRatio: 0.6666 // Air has IndexOfRefraction very near 1.0
+							      // Glass has IndexOfRefraction around 1.5
+				        // thus, the refractionRatio is: 1.0 / 1.5 = 0.6666
+				} );
+				
+				
+					
+				sphereGeometry = new THREE.SphereGeometry(1);
+					
+				sphereMesh[0] = new THREE.Mesh(sphereGeometry, mirrorMaterial);
+				sceneRTT.add(sphereMesh[0]);  sphereMesh[0].visible = false;
+				rttUniforms.uSphereMeshMatrix.value[0] = new THREE.Matrix4();
+				
+				sphereMesh[1] = new THREE.Mesh(sphereGeometry, mirrorMaterial);
+				sceneRTT.add(sphereMesh[1]);  sphereMesh[1].visible = false;
+				rttUniforms.uSphereMeshMatrix.value[1] = new THREE.Matrix4();
+				
+				sphereMesh[2] = new THREE.Mesh(sphereGeometry, whiteMaterial);
+				sceneRTT.add(sphereMesh[2]);  sphereMesh[2].visible = false;
+				rttUniforms.uSphereMeshMatrix.value[2] = new THREE.Matrix4();
+				
+				sphereMesh[3] = new THREE.Mesh(sphereGeometry, glassMaterial);
+				sceneRTT.add(sphereMesh[3]);  sphereMesh[3].visible = false;
+				rttUniforms.uSphereMeshMatrix.value[3] = new THREE.Matrix4();
+			
+				
+				rttUniforms.uMirrorMaterialMatrix.value.elements[0] = sphereMesh[0].material.color.r;
+				rttUniforms.uMirrorMaterialMatrix.value.elements[1] = sphereMesh[0].material.color.g;
+				rttUniforms.uMirrorMaterialMatrix.value.elements[2] = sphereMesh[0].material.color.b;
+				//rttUniforms.uMirrorMaterialMatrix.value.elements[3] = sphereMesh[0].material.shininess;
+				rttUniforms.uMirrorMaterialMatrix.value.elements[3] = 0.01;//sphereMesh[0].material.roughness;
+				rttUniforms.uMirrorMaterialMatrix.value.elements[4] = sphereMesh[0].material.reflectivity;
+				rttUniforms.uMirrorMaterialMatrix.value.elements[5] = sphereMesh[0].material.opacity;
+				rttUniforms.uMirrorMaterialMatrix.value.elements[6] = sphereMesh[0].material.refractionRatio;
+				
+				rttUniforms.uWhiteMaterialMatrix.value.elements[0] = sphereMesh[2].material.color.r;
+				rttUniforms.uWhiteMaterialMatrix.value.elements[1] = sphereMesh[2].material.color.g;
+				rttUniforms.uWhiteMaterialMatrix.value.elements[2] = sphereMesh[2].material.color.b;
+				//rttUniforms.uWhiteMaterialMatrix.value.elements[3] = sphereMesh[2].material.shininess;
+				rttUniforms.uWhiteMaterialMatrix.value.elements[3] = 0.2;//sphereMesh[2].material.roughness;
+				rttUniforms.uWhiteMaterialMatrix.value.elements[4] = sphereMesh[2].material.reflectivity;
+				rttUniforms.uWhiteMaterialMatrix.value.elements[5] = sphereMesh[2].material.opacity;
+				rttUniforms.uWhiteMaterialMatrix.value.elements[6] = sphereMesh[2].material.refractionRatio;
+				
+				rttUniforms.uGlassMaterialMatrix.value.elements[0] = sphereMesh[3].material.color.r;
+				rttUniforms.uGlassMaterialMatrix.value.elements[1] = sphereMesh[3].material.color.g;
+				rttUniforms.uGlassMaterialMatrix.value.elements[2] = sphereMesh[3].material.color.b;
+				//rttUniforms.uGlassMaterialMatrix.value.elements[3] = sphereMesh[3].material.shininess;
+				rttUniforms.uGlassMaterialMatrix.value.elements[3] = 0.02;//sphereMesh[3].material.roughness;
+				rttUniforms.uGlassMaterialMatrix.value.elements[4] = sphereMesh[3].material.reflectivity;
+				rttUniforms.uGlassMaterialMatrix.value.elements[5] = sphereMesh[3].material.opacity;
+				rttUniforms.uGlassMaterialMatrix.value.elements[6] = sphereMesh[3].material.refractionRatio;
+				
+				
+				// TODO make lights.visible = false?
+				// Lights
+				pointLight00 = new THREE.PointLight();
+				// Blue light
+				pointLight00.color.setRGB(0.0, 0.0, 1.0);//RGB, ranging from 0.0-1.0
+				pointLight00.intensity = 50;
+				sceneRTT.add(pointLight00);
+				
+				pointLight01 = new THREE.PointLight();
+				// White light
+				pointLight01.color.setRGB(1.0, 1.0, 1.0);//RGB, ranging from 0.0-1.0
+				pointLight01.intensity = 25; // less intensity due to all rgb values at max
+				sceneRTT.add(pointLight01);
+				
+				pointLight02 = new THREE.PointLight();
+				// Red light
+				pointLight02.color.setRGB(1.0, 0.0, 0.0);//RGB, ranging from 0.0-1.0
+				pointLight02.intensity = 50;
+				sceneRTT.add(pointLight02);
+				
+				rttUniforms.uLightMatrix.value[0] = new THREE.Matrix4();
+				rttUniforms.uLightMatrix.value[1] = new THREE.Matrix4();
+				rttUniforms.uLightMatrix.value[2] = new THREE.Matrix4();
+				
+				
+				rttUniforms.uLightMatrix.value[0].elements[3] = pointLight00.intensity;
+				rttUniforms.uLightMatrix.value[0].elements[4] = pointLight00.color.r;
+				rttUniforms.uLightMatrix.value[0].elements[5] = pointLight00.color.g;
+				rttUniforms.uLightMatrix.value[0].elements[6] = pointLight00.color.b;
+				
+				rttUniforms.uLightMatrix.value[1].elements[3] = pointLight01.intensity;
+				rttUniforms.uLightMatrix.value[1].elements[4] = pointLight01.color.r;
+				rttUniforms.uLightMatrix.value[1].elements[5] = pointLight01.color.g;
+				rttUniforms.uLightMatrix.value[1].elements[6] = pointLight01.color.b;
+				
+				rttUniforms.uLightMatrix.value[2].elements[3] = pointLight02.intensity;
+				rttUniforms.uLightMatrix.value[2].elements[4] = pointLight02.color.r;
+				rttUniforms.uLightMatrix.value[2].elements[5] = pointLight02.color.g;
+				rttUniforms.uLightMatrix.value[2].elements[6] = pointLight02.color.b;
+				
+				
+				screenGeometry = new THREE.PlaneBufferGeometry( 2, 2 );
+				
+				screenMaterial = new THREE.ShaderMaterial( {
+					uniforms: { tTexture0: { type: "t", value: rttPathTraceTexture },
+						    //tTexture1: { type: "t", value: rttScreenOutputTexture }
+						  },
+					vertexShader: document.getElementById( 'screenVertexShader' ).textContent,
+					fragmentShader: document.getElementById( 'screenFragmentShader' ).textContent,
+					depthWrite: false,
+					depthTest: false
+				} );
+				
+				screenMesh = new THREE.Mesh(screenGeometry, screenMaterial);
+				sceneScreen.add(screenMesh);
+				
+				// this must be at the end of the init() function
+				onWindowResize();
+				
+
+			}
+			
+			
+
+			function onWindowResize( event ) {
+
+				rttUniforms.resolution.value.x = window.innerWidth * pixelRatio;
+				rttUniforms.resolution.value.y = window.innerHeight * pixelRatio;
+				
+				rttPathTraceTexture.setSize( window.innerWidth * pixelRatio, window.innerHeight * pixelRatio );
+				rttScreenOutputTexture.setSize( window.innerWidth * pixelRatio, window.innerHeight * pixelRatio );
+				
+				rttCamera.aspect = window.innerWidth / window.innerHeight;
+				rttCamera.updateProjectionMatrix();
+				
+				// the following scales all scene objects by the rttCamera's field of view,
+				// taking into account the screen aspect ratio and multiplying the uniform uULen,
+				// the x-coordinate, by this ratio
+				fovScale = rttCamera.fov * 0.5 * (Math.PI / 180.0);
+				rttUniforms.uVLen.value = Math.tan(fovScale);
+				rttUniforms.uULen.value = rttUniforms.uVLen.value * rttCamera.aspect;
+
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				
+				
+			}
+			
+
+			
+
+			function animate() {
+
+				requestAnimationFrame( animate );
+
+				//frameTime = clock.getDelta();
+				elapsedTime = clock.getElapsedTime() % 1000;
+				//elapsedTime = performance.now() * 0.001;
+				
+				rttUniforms.time.value = elapsedTime;
+				
+				// just testing progressiveness of PathTracing
+				//elapsedTime *= 0.01;
+					
+				// LIGHTS
+				pointLight00.position.set( Math.sin(elapsedTime * 0.2)*10.0, 4.0, -5.0);
+				rttUniforms.uLightMatrix.value[0].elements[0] = pointLight00.position.x;
+				rttUniforms.uLightMatrix.value[0].elements[1] = pointLight00.position.y;
+				rttUniforms.uLightMatrix.value[0].elements[2] = pointLight00.position.z;
+				
+				pointLight01.position.set( Math.sin(elapsedTime * 0.4)*-10.0, 4.0, 5.0);
+				rttUniforms.uLightMatrix.value[1].elements[0] = pointLight01.position.x;
+				rttUniforms.uLightMatrix.value[1].elements[1] = pointLight01.position.y;
+				rttUniforms.uLightMatrix.value[1].elements[2] = pointLight01.position.z;
+				
+				pointLight02.position.set( 3.0, 4.0, Math.sin(elapsedTime * 0.3)*-10.0);
+				rttUniforms.uLightMatrix.value[2].elements[0] = pointLight02.position.x;
+				rttUniforms.uLightMatrix.value[2].elements[1] = pointLight02.position.y;
+				rttUniforms.uLightMatrix.value[2].elements[2] = pointLight02.position.z;
+				
+				
+				
+				// BOXES
+				boxMesh.position.set(-1.0, 1.0, Math.sin(elapsedTime*0.4)*5.0);
+				boxMesh.rotation.set(0, elapsedTime * 0.5, 0);
+				///boxMesh.updateMatrixWorld(true);
+				// The following matrix will be used inside the raymarcher's distance estimator.
+				// It moves the intersection Ray (of the raymarcher) into this object's own space. 
+				rttUniforms.uBoxMeshMatrix.value.getInverse(boxMesh.matrixWorld);
+
+				
+				// SPHERES
+				sphereMesh[0].position.set(0, 0.9 + Math.abs(Math.sin(elapsedTime)) * 3.0, 0);
+				sphereMesh[1].position.set( (Math.cos(elapsedTime)) * 4.0, 0.5, 0 );
+				sphereMesh[2].position.set( Math.sin(elapsedTime) * 3.0, 1.5, Math.cos(elapsedTime) * 3.0 );
+				sphereMesh[3].position.set( Math.cos(elapsedTime) * 2.0, 1.0, Math.sin(elapsedTime) * 2.0 );
+				///sphereMesh[0].updateMatrixWorld(true);
+				///sphereMesh[1].updateMatrixWorld(true);
+				///sphereMesh[2].updateMatrixWorld(true);
+				///sphereMesh[3].updateMatrixWorld(true);
+				rttUniforms.uSphereMeshMatrix.value[0].getInverse(sphereMesh[0].matrixWorld);
+				rttUniforms.uSphereMeshMatrix.value[1].getInverse(sphereMesh[1].matrixWorld);
+				rttUniforms.uSphereMeshMatrix.value[2].getInverse(sphereMesh[2].matrixWorld);
+				rttUniforms.uSphereMeshMatrix.value[3].getInverse(sphereMesh[3].matrixWorld);
+				
+				// CAMERA
+				rttCamera.position.set( (Math.sin(elapsedTime * 0.25)) * 8, 3 + (2.5 * Math.sin(elapsedTime * 0.2)), 1 );
+				//rttCamera.position.set( 0, 0, (Math.sin(elapsedTime)) * 10.0 + 10.0 );
+				//rttCamera.position.set( (Math.sin(elapsedTime * 0.2)) * 10.0, 4, (Math.cos(elapsedTime * 0.2)) * 10.0 );
+				
+				//rttCamera.lookAt(boxMesh.position);
+				rttCamera.lookAt(sceneRTT.position);
+				//rttCamera.updateMatrixWorld(true);
+				
+				rttUniforms.uCameraMatrix.value.copy(rttCamera.matrixWorld);
+				
+                       		
+				// RENDERING in 3 steps
+				
+				// STEP 1
+				// Perform PathTracing and Render into rttPathTraceTexture
+				// Read previous rttScreenOutputTexture to use as a new starting point to blend with
+				renderer.render( sceneRTT, rttCamera, rttPathTraceTexture );
+				
+				// STEP 2
+				// Render full screen quad with generated texture
+				// This will be shown on the screen as the final scene output
+				renderer.render( sceneScreen, quadCamera );
+				
+				// STEP 3
+				// Also render(save) the final scene output into rttScreenOutputTexture
+				// This will be used as a new starting point for Step 1 above
+				renderer.render( sceneScreen, quadCamera, rttScreenOutputTexture );
+				
+				
+				stats.update();
+
+			}
+
+		</script>
+
+	</body>
+</html>
