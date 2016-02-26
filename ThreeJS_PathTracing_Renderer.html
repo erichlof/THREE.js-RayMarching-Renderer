@@ -65,11 +65,9 @@ void main() {
 precision highp float;
 varying vec2 vUv;
 uniform sampler2D tTexture0;
-//uniform sampler2D tTexture1;
 
 void main() {
 
-	//gl_FragColor = mix( texture2D(tTexture0, vUv), texture2D(tTexture1, vUv), 0.5 );
 	gl_FragColor = texture2D(tTexture0, vUv);
 	
 }
@@ -119,6 +117,10 @@ varying vec2 vUv;
 #define EPSILON           	  0.0001
 #define MAX_RENDER_DISTANCE  	  50.0
 
+#define HASHSCALE1 443.8975
+#define HASHSCALE4 vec4(1031, .1030, .0973, .1099)
+#define HASHSCALE3 443.8975
+
 
 // globals
 vec3 lightPos[3];
@@ -127,14 +129,43 @@ vec3 light01Color = vec3(0.0);
 vec3 light02Color = vec3(0.0);
 
 // GLSL rand()-type hash functions
-float hash1( float seed )
+
+//  1 out, 1 in...
+float hash11(float p)
 {
-    return fract( sin(seed) * 98765.4321 );
+	vec3 p3  = fract(vec3(p) * HASHSCALE1);
+    p3 += dot(p3, p3.yzx + 19.19);
+    return fract((p3.x + p3.y) * p3.z);
 }
 
-float hash2( vec2 seed )
+//float hash2( vec2 seed )
+//{
+//   	return fract( sin( dot( seed, vec2(15.79, 81.93) ) ) * 8765.4321 );
+//}
+
+///  2 out, 2 in...
+vec2 hash22(vec2 p)
 {
-    return fract( sin( dot( seed, vec2(15.79, 81.93) ) ) * 8765.4321 );
+	vec3 p3 = fract(vec3(p.xyx) * HASHSCALE3);
+    p3 += dot(p3, p3.yzx+19.19);
+    return fract(vec2((p3.x + p3.y)*p3.z, (p3.x+p3.z)*p3.y));
+}
+
+vec3 cosWeightedRandomHemisphereDirection( vec3 n, vec2 seed ) 
+{
+
+  	vec2 r = hash22( seed );
+    
+	vec3  uu = normalize( cross( n, vec3(0.0,1.0,1.0) ) );
+	vec3  vv = cross( uu, n );
+	
+	float ra = sqrt(r.y);
+	float rx = ra*cos(6.2831*r.x); 
+	float ry = ra*sin(6.2831*r.x);
+	float rz = sqrt( 1.0-r.y );
+	vec3  rr = vec3( rx*uu + ry*vv + rz*n );
+    
+    	return normalize( rr );
 }
 
 
@@ -332,10 +363,10 @@ vec3 radiance (
 	vec3 n,		// macro surface normal
 	vec3 l,		// direction from vertex to light
 	vec3 v,		// direction from vertex to view
-	float m,	// roughness
-	vec3 cdiff,	// diffuse  reflectance
-	vec3 cspec,	// specular reflectance : F0
-	vec3 clight	// light intensity
+	float mR,	// material roughness
+	vec3 mDiff,	// material diffuse  reflectance
+	vec3 mSpec,	// material specular reflectance : F0
+	vec3 cLight	// light intensity
 ) 
 {
 	// half vector
@@ -362,20 +393,20 @@ vec3 radiance (
  	// Beckmann distribution
 	//         ( N dot H )^2 - 1
 	//  exp( ----------------------- )
-	//         ( N dot H )^2 * m^2
+	//         ( N dot H )^2 * mR^2
 	// --------------------------------
-	//         ( N dot H )^4 * m^2
+	//         ( N dot H )^4 * mR^2
     	float sq_nh   = dot_n_h * dot_n_h;
-	float sq_nh_m = sq_nh * ( m * m );
-	float D = exp( ( sq_nh - 1.0 ) / sq_nh_m ) / ( sq_nh * sq_nh_m );
+	float sq_nh_mr = sq_nh * ( mR * mR ) + 0.0001; // avoid division by 0
+	float D = exp( ( sq_nh - 1.0 ) / sq_nh_mr ) / ( sq_nh * sq_nh_mr );
 
 	// Specular Fresnel Term : Schlick approximation
 	// F0 + ( 1 - F0 ) * ( 1 - ( H dot V ) )^5
-	vec3 Fspec = cspec + ( 1.0  - cspec ) * pow( 1.0 - dot_h_v, 5.0 );
+	vec3 Fspec = mSpec + ( 1.0  - mSpec ) * pow( 1.0 - dot_h_v, 5.0 );
 	
 	// Diffuse Fresnel Term : violates reciprocity...
 	// F0 + ( 1 - F0 ) * ( 1 - ( N dot L ) )^5
-	vec3 Fdiff = cspec + ( 1.0  - cspec ) * pow( 1.0 - dot_n_l, 5.0 );
+	vec3 Fdiff = mSpec + ( 1.0  - mSpec ) * pow( 1.0 - dot_n_l, 5.0 );
 	
     
 	// Cook-Torrance BRDF
@@ -385,10 +416,10 @@ vec3 radiance (
 	vec3 brdf_spec = Fspec * D * G / ( dot_n_v * dot_n_l * 4.0 );
 	
 	// Lambertian BRDF ( cancel 1 / pi )
-	vec3 brdf_diff = cdiff * ( 1.0 - Fdiff );
+	vec3 brdf_diff = mDiff * ( 1.0 - Fdiff );
 	
 	// Punctual Light Source ( cancel pi )
-	return ( brdf_spec + brdf_diff ) * clight * dot_n_l;	
+	return ( brdf_spec + brdf_diff ) * cLight * dot_n_l;	
 }
 
 // shading
@@ -396,8 +427,8 @@ vec3 shading( vec3 p, vec3 n, vec3 eye, mat3 materialMatrix , float materialID, 
 {
 	// material
 	float roughness = materialMatrix[1][0];
-	vec3 cdiff = vec3( materialMatrix[0][0], materialMatrix[0][1], materialMatrix[0][2] );
-	vec3 cspec = vec3(0.6);
+	vec3 mDiff = vec3( materialMatrix[0][0], materialMatrix[0][1], materialMatrix[0][2] );
+	vec3 mSpec = vec3(0.);
 
 	vec3 ve = normalize( eye - p );
 
@@ -414,7 +445,7 @@ vec3 shading( vec3 p, vec3 n, vec3 eye, mat3 materialMatrix , float materialID, 
 		//	pattern = 0.0;
     		//else pattern = clamp( chessBoard(p, 0.5), 0.3, 1.0 );
 		
-		cdiff *= pattern;
+		mDiff *= pattern;
 	}
 
 	
@@ -425,11 +456,8 @@ vec3 shading( vec3 p, vec3 n, vec3 eye, mat3 materialMatrix , float materialID, 
 		float shadow = 1.0;
 		if (doShadows) 
 			shadow = softShadow( p, vl );
-
-		if (shadow > 0.9)
-			final += radiance( n, vl, ve, roughness, cdiff, cspec, light00Color );
-		else 
-			final += radiance( n, vl, ve, roughness, cdiff, cspec, light00Color * shadow );
+		
+		final += radiance( n, vl, ve, roughness, mDiff, mSpec, light00Color * shadow );
 	}
 	
 	// light 1
@@ -440,10 +468,7 @@ vec3 shading( vec3 p, vec3 n, vec3 eye, mat3 materialMatrix , float materialID, 
 		if (doShadows) 
 			shadow = softShadow( p, vl );
 
-		if (shadow > 0.9)
-			final += radiance( n, vl, ve, roughness, cdiff, cspec, light01Color );
-		else
-			final += radiance( n, vl, ve, roughness, cdiff, cspec, light01Color * shadow );
+		final += radiance( n, vl, ve, roughness, mDiff, mSpec, light01Color * shadow );
 	}
 	
 	// light 2
@@ -453,11 +478,8 @@ vec3 shading( vec3 p, vec3 n, vec3 eye, mat3 materialMatrix , float materialID, 
 		float shadow = 1.0;
 		if (doShadows)
 			shadow = softShadow( p, vl );
-
-		if (shadow > 0.9)
-			final += radiance( n, vl, ve, roughness, cdiff, cspec, light02Color );
-		else
-			final += radiance( n, vl, ve, roughness, cdiff, cspec, light02Color * shadow );
+		
+		final += radiance( n, vl, ve, roughness, mDiff, mSpec, light02Color * shadow );
 	}
 
 	return final;
@@ -468,7 +490,8 @@ void main( void )
 {
 
 	mat3 materialMatrix;
-	vec2 camUV = (gl_FragCoord.xy/resolution.xy) * 2.0 - 1.0;
+	vec2 screenPos = gl_FragCoord.xy / resolution.xy;
+	vec2 camUV = screenPos * 2.0 - 1.0;
 	vec3 camPos = vec3(uCameraMatrix[3][0], uCameraMatrix[3][1], uCameraMatrix[3][2]);
 	
     	vec3 camRight   = ( vec3( uCameraMatrix[0][0],  uCameraMatrix[0][1],  uCameraMatrix[0][2]) );
@@ -477,16 +500,26 @@ void main( void )
 	
 	
     	vec3 rayDir = normalize(camUV.x * camRight * uULen + camUV.y * camUp * uVLen + camForward);
-	rayDir += vec3( hash1(rayDir.x), hash1(rayDir.y), hash1(rayDir.z) ) * 0.005;
-	//camPos += (vec3( hash1(time), hash1(time+3.0), hash1(time+7.0) ) * 0.01);
+	// jittering
+	rayDir += ( vec3( hash11(sin(time+screenPos.x)), hash11(cos(time+screenPos.y)), hash11(cos(time+screenPos.x)) ) * 0.003 );
+	//camPos += ( vec3( hash11(sin(time+screenPos.y)), hash11(cos(time+screenPos.x)), hash11(cos(time+screenPos.y)) ) * 0.01 );
 	
 	vec3 normal = vec3( 0.0 );
+	
 	vec3 reflectedPos = vec3(0.0);
 	vec3 reflectionNormal = vec3( 0.0 );
-	vec3 reflectDir = vec3( 0.0 );
+	vec3 reflectedDir = vec3( 0.0 );
 	vec3 reflectedColor = vec3( 0.0 );
-	vec3 refractDir = vec3( 0.0 );
+	
+	vec3 refractedPos = vec3(0.0);
+	vec3 refractionNormal = vec3( 0.0 );
+	vec3 refractedDir = vec3( 0.0 );
 	vec3 refractedColor = vec3( 0.0 );
+	
+	vec3 specularReflectDir = vec3( 0.0 );
+	vec3 diffuseReflectDir = vec3( 0.0 );
+	
+	
 	vec3 linearColor = vec3( 0.0 );
 	vec3 finalColor = vec3( 0.0 );
 	
@@ -498,7 +531,7 @@ void main( void )
     	light01Color = vec3( uLightMatrix[1][1][0], uLightMatrix[1][1][1], uLightMatrix[1][1][2] );
 	light02Color = vec3( uLightMatrix[2][1][0], uLightMatrix[2][1][1], uLightMatrix[2][1][2] );
 	
-	float reflectivity = 0.0;
+	float roughness = 0.0;
 	float opacity = 0.0;
 	float refractionRatio = 0.0;
 	float distFromCamera = 0.0;
@@ -521,7 +554,7 @@ void main( void )
 	// get current material
 	materialMatrix = getMaterialMatrix( res.y );
 	// get material properties
-	reflectivity = materialMatrix[1][1];
+	roughness = materialMatrix[1][1];
 	opacity = materialMatrix[1][2];
 	refractionRatio = materialMatrix[2][0];
 	
@@ -547,27 +580,29 @@ void main( void )
     		
 		normal = computeSurfaceNormal( pos );
     					
-		///linearColor = shade( pos, rayDir, normal, materialMatrix, res.y, true );
 		linearColor = shading( pos, normal, camPos, materialMatrix, res.y, true );
 		
 		// REFLECTION
-		///if (reflectivity > 0.0)
 		{
 			// compute reflected color
-			reflectDir = reflect(rayDir, normal);
+			specularReflectDir = reflect(rayDir, normal);
+			diffuseReflectDir = cosWeightedRandomHemisphereDirection( normal, camUV );
+			
+			reflectedDir = mix( specularReflectDir, diffuseReflectDir, roughness );
+			
 			// reflection raymarching
 			delta = 0.01;
 			res = vec2( 0.0 );
 	
     			for( int i = 0; i < MAX_REFLECTION_ITERATIONS; i++ ) 
 			{
-        			res = getDistToNearestObj( pos + reflectDir * delta, false );
+        			res = getDistToNearestObj( pos + reflectedDir * delta, false );
         			//if ( res.x < EPSILON || delta > MAX_RENDER_DISTANCE ) break;
 				//if ( res.x < EPSILON ) break;
         			delta += res.x;
     			}
 			
-			reflectedPos = pos + reflectDir * delta;
+			reflectedPos = pos + reflectedDir * delta;
 			
 			// check if the ray didn't hit anything
 			reflectedDistFromCamera = length( reflectedPos - camPos );
@@ -576,29 +611,18 @@ void main( void )
 				reflectedColor = vec3(0.0);
 				res.y = -5.0;
 			}
-			/*
-			// check if we hit a light source
-			else if ( res.y == -1.0 ) reflectedColor = light00Color;
-			else if ( res.y == -2.0 ) reflectedColor = light01Color;
-			else if ( res.y == -3.0 ) reflectedColor = light02Color;
-			*/
 			
 			if ( res.y >= 0.0 )
 			{
 				// get current material
 				materialMatrix = getMaterialMatrix( res.y );
 
-				
-
 				reflectionNormal = computeSurfaceNormal( reflectedPos );
 
 				// add reflected color to original linearColor
-				///reflectedColor = shade( reflectedPos, reflectDir, reflectionNormal, materialMatrix, res.y, false );
-				reflectedColor = shading( reflectedPos, reflectionNormal, pos, materialMatrix, res.y, false  );
+				reflectedColor = shading( reflectedPos, reflectionNormal, camPos, materialMatrix, res.y, false  );
 			}
 			
-			
-			linearColor += reflectedColor * reflectivity;
 		
 		}
 		
@@ -608,7 +632,7 @@ void main( void )
 		{
 		
 			// we are entering the glass material
-			refractDir = refract(rayDir, normal, refractionRatio);
+			refractedDir = refract(rayDir, normal, refractionRatio);
 			
 			delta = 0.01;
 			res = vec2( 0.0 );
@@ -616,17 +640,19 @@ void main( void )
 			// trace until we hit other side of object
 			for( int i = 0; i < MAX_REFLECTION_ITERATIONS; i++ ) 
 			{
-        			res = getDistToNearestObj( pos + refractDir * delta, false );
+        			res = getDistToNearestObj( pos + refractedDir * delta, false );
 				delta -= res.x;
 				//if ( -res.x > -EPSILON ) break;
         			
     			}
 			
 			// we are now exiting the glass material
-			reflectedPos = pos + refractDir * delta;	
-			reflectionNormal = computeSurfaceNormal( reflectedPos );
+			refractedPos = pos + refractedDir * delta;	
+			refractionNormal = computeSurfaceNormal( refractedPos );
 			
-			refractDir = refract(refractDir, -reflectionNormal, 1.0 / refractionRatio);
+			refractedDir = refract(refractedDir, -refractionNormal, 1.0 / refractionRatio);
+			
+			// TODO get weighted random sample and mix with roughness like above (in reflection routine)
 			
 			delta = 0.01;
 			res = vec2( 0.0 );
@@ -634,45 +660,44 @@ void main( void )
 			// trace until we hit another world object and get its color
     			for( int i = 0; i < MAX_REFLECTION_ITERATIONS; i++ ) 
 			{
-        			res = getDistToNearestObj( reflectedPos + refractDir * delta, false );
+        			res = getDistToNearestObj( refractedPos + refractedDir * delta, false );
 				//if ( res.x < EPSILON || delta > MAX_RENDER_DISTANCE ) break;
-				//if ( res.x < EPSILON ) break;
+				if ( res.x < EPSILON ) break;
 				delta += res.x;
     			}
 			
-			reflectedPos = reflectedPos + refractDir * delta;
+			refractedPos = refractedPos + refractedDir * delta;
 			
 			// check if the ray didn't hit anything
-			reflectedDistFromCamera = length( reflectedPos - camPos );
+			reflectedDistFromCamera = length( refractedPos - camPos );
 			if ( reflectedDistFromCamera > MAX_RENDER_DISTANCE )
 			{
 				refractedColor = vec3(0.0);
 				res.y = -5.0;
 			}
-			/*
-			// check if we hit a light source
-			else if ( res.y == -1.0 ) refractedColor = light00Color;
-			else if ( res.y == -2.0 ) refractedColor = light01Color;
-			else if ( res.y == -3.0 ) refractedColor = light02Color;
-			*/
 			
 			if ( res.y >= 0.0 )
 			{
 				// get current material
 				materialMatrix = getMaterialMatrix( res.y );
 
-				reflectionNormal = computeSurfaceNormal( reflectedPos );
+				refractionNormal = computeSurfaceNormal( refractedPos );
 
 				// add reflected color to original linearColor
-				///refractedColor = shade( reflectedPos, refractDir, reflectionNormal, materialMatrix, res.y, false );
-				refractedColor = shading( reflectedPos, reflectionNormal, pos, materialMatrix, res.y, false );
+				refractedColor = shading( refractedPos, refractionNormal, camPos, materialMatrix, res.y, false );
 			}
 			
 			
-			linearColor += refractedColor;// * (1.0 - opacity);	
+			//TODO the following is not correct, just something to be able to see both colors
+			reflectedColor = (reflectedColor * 0.1) + (refractedColor * 0.9); 
 		}
 			
 	}
+	
+	
+	// TODO add fresnel factor instead of roughness
+	linearColor = mix(reflectedColor * 0.9, linearColor, 0.5);
+	
 	
 	//linearColor = clamp( linearColor, 0.0, 1.0 );
 	
@@ -685,7 +710,11 @@ void main( void )
 	finalColor = sqrt( linearColor ); 
 	//finalColor = pow( linearColor, vec3( 1.0 / screenGamma ) );
 		
-    	gl_FragColor = mix( texture2D(tPreviousTexture, vUv), vec4(finalColor, 1.0) * 0.8, 0.1 );
+    	//gl_FragColor = mix( texture2D(tPreviousTexture, vUv), vec4(finalColor, 1.0), 0.05 );
+	// Motion Blur
+	gl_FragColor = (texture2D(tPreviousTexture, vUv) * 0.91) + (vec4(finalColor, 1.0) * 0.1);
+	// Fast Converging
+	//gl_FragColor = (texture2D(tPreviousTexture, vUv) * 0.5) + (vec4(finalColor, 1.0) * 0.5);
 }
 
 		</script>
@@ -710,7 +739,7 @@ void main( void )
 			var fovScale;
 			var frameTime, elapsedTime;
 			var rttUniforms;
-			var pixelRatio = 0.3;
+			var pixelRatio = 0.4;
 			var TWO_PI = Math.PI * 2;
 			var rotationalAmount = 2.0;
 			var rotationalAxis = new THREE.Vector3(0,1,0);
@@ -817,9 +846,8 @@ void main( void )
 				groundGeometry = new THREE.PlaneBufferGeometry(1000, 1000, 1, 1);
 				checkeredMaterial = new THREE.MeshPhongMaterial( {
 					color: new THREE.Color(0.8, 0.8, 0.8), //RGB, ranging from 0.0 - 1.0
-					shininess: 1000, // medium shininess
-					//roughness: 0.4,
-					reflectivity: 0.5, // higher reflection for marble-like surface
+					//roughness: 0.2,
+					reflectivity: 0.0, //TODO change reflectivity to roughness
 					opacity: 1.0,
 					refractionRatio: 0.98
 				} );
@@ -834,9 +862,9 @@ void main( void )
 				rttUniforms.uCheckeredMaterialMatrix.value.elements[0] = groundMesh.material.color.r;
 				rttUniforms.uCheckeredMaterialMatrix.value.elements[1] = groundMesh.material.color.g;
 				rttUniforms.uCheckeredMaterialMatrix.value.elements[2] = groundMesh.material.color.b;
-				//rttUniforms.uCheckeredMaterialMatrix.value.elements[3] = groundMesh.material.shininess;
-				rttUniforms.uCheckeredMaterialMatrix.value.elements[3] = 0.3;//groundMesh.material.roughness;
-				rttUniforms.uCheckeredMaterialMatrix.value.elements[4] = groundMesh.material.reflectivity;
+				//rttUniforms.uCheckeredMaterialMatrix.value.elements[3] = groundMesh.material.metalness;
+				rttUniforms.uCheckeredMaterialMatrix.value.elements[3] = 0.0;
+				rttUniforms.uCheckeredMaterialMatrix.value.elements[4] = groundMesh.material.reflectivity; //TODO change reflectivity to roughness
 				rttUniforms.uCheckeredMaterialMatrix.value.elements[5] = groundMesh.material.opacity;
 				rttUniforms.uCheckeredMaterialMatrix.value.elements[6] = groundMesh.material.refractionRatio;
 				
@@ -845,9 +873,8 @@ void main( void )
 				boxGeometry = new THREE.BoxGeometry(1,1,1);
 				blueMaterial = new THREE.MeshPhongMaterial( {
 					color: new THREE.Color(0.0, 0.0, 0.5), //RGB, ranging from 0.0 - 1.0
-					shininess: 3000, // very shiny
-					//roughness: 0.4,
-					reflectivity: 0.05, // a hint of reflection in plastic material
+					//roughness: 0.01,
+					reflectivity: 0.01, //TODO change reflectivity to roughness
 					opacity: 1.0,
 					refractionRatio: 0.98
 				} );
@@ -859,9 +886,9 @@ void main( void )
 				rttUniforms.uBlueMaterialMatrix.value.elements[0] = boxMesh.material.color.r;
 				rttUniforms.uBlueMaterialMatrix.value.elements[1] = boxMesh.material.color.g;
 				rttUniforms.uBlueMaterialMatrix.value.elements[2] = boxMesh.material.color.b;
-				//rttUniforms.uBlueMaterialMatrix.value.elements[3] = boxMesh.material.shininess;
-				rttUniforms.uBlueMaterialMatrix.value.elements[3] = 0.2;//boxMesh.material.roughness;
-				rttUniforms.uBlueMaterialMatrix.value.elements[4] = boxMesh.material.reflectivity;
+				//rttUniforms.uBlueMaterialMatrix.value.elements[3] = boxMesh.material.metalness;
+				rttUniforms.uBlueMaterialMatrix.value.elements[3] = 0.0;
+				rttUniforms.uBlueMaterialMatrix.value.elements[4] = boxMesh.material.reflectivity; //TODO change reflectivity to roughness
 				rttUniforms.uBlueMaterialMatrix.value.elements[5] = boxMesh.material.opacity;
 				rttUniforms.uBlueMaterialMatrix.value.elements[6] = boxMesh.material.refractionRatio;
 				
@@ -869,30 +896,26 @@ void main( void )
 				// Spheres
 				mirrorMaterial = new THREE.MeshPhongMaterial( {
 					color: new THREE.Color(0.0, 0.0, 0.0), //RGB, ranging from 0.0 - 1.0
-					shininess: 4000, // extremely shiny
-					//roughness: 0.02,
-					reflectivity: 1.0, // perfect mirror, max reflectivity
+					//roughness: 0.0,
+					reflectivity: 0.0, //TODO change reflectivity to roughness
 					opacity: 1.0,
 					refractionRatio: 0.98
 				} );
 				whiteMaterial = new THREE.MeshPhongMaterial( {
 					color: new THREE.Color(0.99, 0.99, 0.99), //RGB, from 0.0 - 1.0
-					shininess: 3000, // very shiny
-					//roughness: 0.1,
-					reflectivity: 0.1, // a hint of reflection in plastic material
+					//roughness: 0.0,
+					reflectivity: 0.0, //TODO change reflectivity to roughness
 					opacity: 1.0,
 					refractionRatio: 0.98
 				} );
 				glassMaterial = new THREE.MeshPhongMaterial( {
-					color: new THREE.Color(0.0, 0.0, 0.0), //RGB, from 0.0 - 1.0
-					shininess: 4000, // very shiny
-					//roughness: 0.02,
-					reflectivity: 0.0, // no reflectivity for Android to work :(
-					//reflectivity: 0.03, // only slightly reflective
-					opacity: 0.0, // 0.01 almost fully transparent
+					color: new THREE.Color(0.0, 1.0, 0.2), //RGB, from 0.0 - 1.0
+					//roughness: 0.001,
+					reflectivity: 0.001, //TODO change reflectivity to roughness
+					opacity: 0.01, // 0.01 almost fully transparent
 					refractionRatio: 0.6666 // Air has IndexOfRefraction very near 1.0
 							      // Glass has IndexOfRefraction around 1.5
-				        // thus, the refractionRatio is: 1.0 / 1.5 = 0.6666
+				        		// thus, the refractionRatio is: 1.0 / 1.5 = 0.6666
 				} );
 				
 				
@@ -919,27 +942,27 @@ void main( void )
 				rttUniforms.uMirrorMaterialMatrix.value.elements[0] = sphereMesh[0].material.color.r;
 				rttUniforms.uMirrorMaterialMatrix.value.elements[1] = sphereMesh[0].material.color.g;
 				rttUniforms.uMirrorMaterialMatrix.value.elements[2] = sphereMesh[0].material.color.b;
-				//rttUniforms.uMirrorMaterialMatrix.value.elements[3] = sphereMesh[0].material.shininess;
-				rttUniforms.uMirrorMaterialMatrix.value.elements[3] = 0.01;//sphereMesh[0].material.roughness;
-				rttUniforms.uMirrorMaterialMatrix.value.elements[4] = sphereMesh[0].material.reflectivity;
+				//rttUniforms.uMirrorMaterialMatrix.value.elements[3] = sphereMesh[0].material.metalness;
+				rttUniforms.uMirrorMaterialMatrix.value.elements[3] = 0.0;
+				rttUniforms.uMirrorMaterialMatrix.value.elements[4] = sphereMesh[0].material.reflectivity; //TODO change reflectivity to roughness
 				rttUniforms.uMirrorMaterialMatrix.value.elements[5] = sphereMesh[0].material.opacity;
 				rttUniforms.uMirrorMaterialMatrix.value.elements[6] = sphereMesh[0].material.refractionRatio;
 				
 				rttUniforms.uWhiteMaterialMatrix.value.elements[0] = sphereMesh[2].material.color.r;
 				rttUniforms.uWhiteMaterialMatrix.value.elements[1] = sphereMesh[2].material.color.g;
 				rttUniforms.uWhiteMaterialMatrix.value.elements[2] = sphereMesh[2].material.color.b;
-				//rttUniforms.uWhiteMaterialMatrix.value.elements[3] = sphereMesh[2].material.shininess;
-				rttUniforms.uWhiteMaterialMatrix.value.elements[3] = 0.2;//sphereMesh[2].material.roughness;
-				rttUniforms.uWhiteMaterialMatrix.value.elements[4] = sphereMesh[2].material.reflectivity;
+				//rttUniforms.uWhiteMaterialMatrix.value.elements[3] = sphereMesh[2].material.metalness;
+				rttUniforms.uWhiteMaterialMatrix.value.elements[3] = 0.0;
+				rttUniforms.uWhiteMaterialMatrix.value.elements[4] = sphereMesh[2].material.reflectivity; //TODO change reflectivity to roughness
 				rttUniforms.uWhiteMaterialMatrix.value.elements[5] = sphereMesh[2].material.opacity;
 				rttUniforms.uWhiteMaterialMatrix.value.elements[6] = sphereMesh[2].material.refractionRatio;
 				
 				rttUniforms.uGlassMaterialMatrix.value.elements[0] = sphereMesh[3].material.color.r;
 				rttUniforms.uGlassMaterialMatrix.value.elements[1] = sphereMesh[3].material.color.g;
 				rttUniforms.uGlassMaterialMatrix.value.elements[2] = sphereMesh[3].material.color.b;
-				//rttUniforms.uGlassMaterialMatrix.value.elements[3] = sphereMesh[3].material.shininess;
-				rttUniforms.uGlassMaterialMatrix.value.elements[3] = 0.02;//sphereMesh[3].material.roughness;
-				rttUniforms.uGlassMaterialMatrix.value.elements[4] = sphereMesh[3].material.reflectivity;
+				//rttUniforms.uGlassMaterialMatrix.value.elements[3] = sphereMesh[3].material.metalness;
+				rttUniforms.uGlassMaterialMatrix.value.elements[3] = 0.0;
+				rttUniforms.uGlassMaterialMatrix.value.elements[4] = sphereMesh[3].material.reflectivity; //TODO change reflectivity to roughness
 				rttUniforms.uGlassMaterialMatrix.value.elements[5] = sphereMesh[3].material.opacity;
 				rttUniforms.uGlassMaterialMatrix.value.elements[6] = sphereMesh[3].material.refractionRatio;
 				
@@ -1045,7 +1068,7 @@ void main( void )
 				rttUniforms.time.value = elapsedTime;
 				
 				// just testing progressiveness of PathTracing
-				//elapsedTime *= 0.01;
+				//elapsedTime = 18.0;
 					
 				// LIGHTS
 				pointLight00.position.set( Math.sin(elapsedTime * 0.2)*10.0, 4.0, -5.0);
