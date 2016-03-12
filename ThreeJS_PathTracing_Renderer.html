@@ -111,22 +111,24 @@ varying vec2 vUv;
 
 
 #define PI		  	  3.14159265359
+#define RECIPROCAL_PI 		  0.31830988618
 #define MAX_ITERATIONS	  	  200
 #define MAX_REFLECTION_ITERATIONS 60
 #define MAX_SHADOW_STEPS  	  45
 #define EPSILON           	  0.0001
 #define MAX_RENDER_DISTANCE  	  50.0
 
-#define HASHSCALE1 443.8975
-#define HASHSCALE4 vec4(1031, .1030, .0973, .1099)
-#define HASHSCALE3 443.8975
+#define HASHSCALE1                443.8975
+#define HASHSCALE3 		  443.8975
 
+#define saturate(a) clamp( a, 0.0, 1.0 )
 
 // globals
 vec3 lightPos[3];
 vec3 light00Color = vec3(0.0);
 vec3 light01Color = vec3(0.0);
 vec3 light02Color = vec3(0.0);
+
 
 // GLSL rand()-type hash functions
 
@@ -138,12 +140,7 @@ float hash11(float p)
     return fract((p3.x + p3.y) * p3.z);
 }
 
-//float hash2( vec2 seed )
-//{
-//   	return fract( sin( dot( seed, vec2(15.79, 81.93) ) ) * 8765.4321 );
-//}
-
-///  2 out, 2 in...
+//  2 out, 2 in...
 vec2 hash22(vec2 p)
 {
 	vec3 p3 = fract(vec3(p.xyx) * HASHSCALE3);
@@ -154,7 +151,7 @@ vec2 hash22(vec2 p)
 vec3 cosWeightedRandomHemisphereDirection( vec3 n, vec2 seed ) 
 {
 
-  	vec2 r = hash22( seed );
+  	vec2 r = hash22( seed * time);
     
 	vec3  uu = normalize( cross( n, vec3(0.0,1.0,1.0) ) );
 	vec3  vv = cross( uu, n );
@@ -355,83 +352,100 @@ float softShadow( vec3 ro, vec3 rd )
 		//if (t > 20.0) break;
     	}
     	return clamp( res, 0.1, 1.0 );
-	//return 1.0;
 }
 
-
-vec3 radiance (
-	vec3 n,		// macro surface normal
-	vec3 l,		// direction from vertex to light
-	vec3 v,		// direction from vertex to view
-	float mR,	// material roughness
-	vec3 mDiff,	// material diffuse  reflectance
-	vec3 mSpec,	// material specular reflectance : F0
-	vec3 cLight	// light intensity
-) 
+float orenNayarDiffuse (
+  	vec3 lightDirection,
+  	vec3 surfaceNormal,
+  	vec3 viewDirection,
+  	float roughness,
+  	float albedo )
 {
-	// half vector
-	vec3 h = normalize( l + v );
-	
-	// dot
-	float dot_n_h = max( abs( dot( n, h ) ), 0.001 );
-	float dot_n_v = max( abs( dot( n, v ) ), 0.001 );
-	float dot_n_l = max( abs( dot( n, l ) ), 0.001 );
-	float dot_h_v = max( abs( dot( h, v ) ), 0.001 ); // dot_h_v == dot_h_l
-	
-	// Geometric Term
+  
+  	float LdotV = dot(lightDirection, viewDirection);
+  	float NdotL = dot(lightDirection, surfaceNormal);
+  	float NdotV = dot(surfaceNormal, viewDirection);
 
-    	// Cook-Torrance
-    	//          2 * ( N dot H )( N dot L )    2 * ( N dot H )( N dot V )
-	// min( 1, ----------------------------, ---------------------------- )
-	//                 ( H dot V )                   ( H dot V )
-	float g = 2.0 * dot_n_h / dot_h_v;
-	float G = min( min( dot_n_v, dot_n_l ) * g, 1.0 );
+  	float s = LdotV - NdotL * NdotV;
+  	float t = mix(1.0, max(NdotL, NdotV), step(0.0, s));
 
-    
-    	// Normal Distribution Function ( cancel 1 / pi )
+  	float sigma2 = roughness * roughness;
+  	float A = 1.0 + sigma2 * (albedo / (sigma2 + 0.13) + 0.5 / (sigma2 + 0.33));
+  	float B = 0.45 * sigma2 / (sigma2 + 0.09);
 
- 	// Beckmann distribution
-	//         ( N dot H )^2 - 1
-	//  exp( ----------------------- )
-	//         ( N dot H )^2 * mR^2
-	// --------------------------------
-	//         ( N dot H )^4 * mR^2
-    	float sq_nh   = dot_n_h * dot_n_h;
-	float sq_nh_mr = sq_nh * ( mR * mR ) + 0.0001; // avoid division by 0
-	float D = exp( ( sq_nh - 1.0 ) / sq_nh_mr ) / ( sq_nh * sq_nh_mr );
-
-	// Specular Fresnel Term : Schlick approximation
-	// F0 + ( 1 - F0 ) * ( 1 - ( H dot V ) )^5
-	vec3 Fspec = mSpec + ( 1.0  - mSpec ) * pow( 1.0 - dot_h_v, 5.0 );
-	
-	// Diffuse Fresnel Term : violates reciprocity...
-	// F0 + ( 1 - F0 ) * ( 1 - ( N dot L ) )^5
-	vec3 Fdiff = mSpec + ( 1.0  - mSpec ) * pow( 1.0 - dot_n_l, 5.0 );
-	
-    
-	// Cook-Torrance BRDF
-	//          D * F * G
-	// ---------------------------
-	//  4 * ( N dot V )( N dot L )
-	vec3 brdf_spec = Fspec * D * G / ( dot_n_v * dot_n_l * 4.0 );
-	
-	// Lambertian BRDF ( cancel 1 / pi )
-	vec3 brdf_diff = mDiff * ( 1.0 - Fdiff );
-	
-	// Punctual Light Source ( cancel pi )
-	return ( brdf_spec + brdf_diff ) * cLight * dot_n_l;	
+  	return albedo * max(0.0, NdotL) * (A + B * s / t) * RECIPROCAL_PI;
 }
+
+
+vec3 F_Schlick( vec3 specularColor, float dotLH )
+{
+
+	float fresnel = exp2( ( -5.55473 * dotLH - 6.98316 ) * dotLH );
+
+	return ( 1.0 - specularColor ) * fresnel + specularColor;
+
+} // validated
+
+
+float G_GGX_Smith( float alpha, float dotNL, float dotNV ) 
+{
+
+	float a2 = alpha;
+
+	float gl = max( 0.00001, dotNL + pow( a2 + ( 1.0 - a2 ) * dotNL * dotNL, 0.5 ) );
+
+	float gv = max( 0.00001, dotNV + pow( a2 + ( 1.0 - a2 ) * dotNV * dotNV, 0.5 ) );
+
+	return 1.0 / ( gl * gv );
+	
+
+} // validated
+
+
+float D_GGX( float alpha, float dotNH ) {
+
+	float a2 = alpha;
+
+	float denom = dotNH * dotNH * ( a2 - 1.0 ) + 1.0;
+
+	return RECIPROCAL_PI * a2 / ( denom * denom );
+
+}
+
+
+// GGX Distribution, Schlick Fresnel, GGX-Smith Visibility
+vec3 BRDF_Specular_GGX( vec3 lightDirection, vec3 normal, vec3 viewDirection, vec3 specularColor, float roughness ) {
+
+	float alpha = roughness * roughness;
+
+	vec3 halfDir = normalize( lightDirection + viewDirection );
+
+	float dotNL = saturate( dot( normal, lightDirection ) );
+	float dotNV = saturate( dot( normal, viewDirection ) );
+	float dotNH = saturate( dot( normal, halfDir ) );
+	float dotLH = saturate( dot( lightDirection, halfDir ) );
+
+	vec3 F = F_Schlick( specularColor, dotLH );
+
+	float G = G_GGX_Smith( alpha, dotNL, dotNV );
+
+	float D = D_GGX( alpha, dotNH );
+
+	return F * ( G * D );
+
+} // validated
+
 
 // shading
-vec3 shading( vec3 p, vec3 n, vec3 eye, mat3 materialMatrix , float materialID, bool doShadows )
+vec3 shading( vec3 p, vec3 n, vec3 eyePos, mat3 materialMatrix , float materialID, bool doShadows )
 {
 	// material
 	float roughness = materialMatrix[1][0];
 	vec3 mDiff = vec3( materialMatrix[0][0], materialMatrix[0][1], materialMatrix[0][2] );
-	vec3 mSpec = vec3(0.);
-
-	vec3 ve = normalize( eye - p );
-
+	vec3 mSpec = vec3(0.5);
+	
+	vec3 viewDirection = normalize( eyePos - p );
+	vec3 ambient = vec3( 0.0 );
 	vec3 final = vec3( 0.0 );
 	
 	// do checkerBoard pattern on floor
@@ -451,35 +465,57 @@ vec3 shading( vec3 p, vec3 n, vec3 eye, mat3 materialMatrix , float materialID, 
 	
 	// light 0
 	{
-		vec3 vl = normalize( lightPos[0] - p );
+		vec3 vl = lightPos[0] - p;
+		float lengthLightVector = length(vl);
+		vl = normalize( vl );
 		
 		float shadow = 1.0;
 		if (doShadows) 
 			shadow = softShadow( p, vl );
 		
-		final += radiance( n, vl, ve, roughness, mDiff, mSpec, light00Color * shadow );
+		float dotNL = saturate( dot( n, vl ) );
+			
+		vec3 irradiance = dotNL * light00Color * shadow;
+		
+		final += irradiance * BRDF_Specular_GGX( vl, n, viewDirection, mSpec, roughness ) + irradiance * orenNayarDiffuse( vl, n, viewDirection, 0.5, 1.0 ) * mDiff; 
+				
+				
 	}
 	
 	// light 1
 	{
-		vec3 vl = normalize( lightPos[1] - p );
+		vec3 vl = lightPos[1] - p;
+		float lengthLightVector = length(vl);
+		vl = normalize( vl );
 		
 		float shadow = 1.0;
 		if (doShadows) 
 			shadow = softShadow( p, vl );
-
-		final += radiance( n, vl, ve, roughness, mDiff, mSpec, light01Color * shadow );
+			
+		float dotNL = saturate( dot( n, vl ) );
+		
+		vec3 irradiance = dotNL * light01Color * shadow;
+		
+		final += irradiance * BRDF_Specular_GGX( vl, n, viewDirection, mSpec, roughness ) + irradiance * orenNayarDiffuse( vl, n, viewDirection, 0.5, 1.0 ) * mDiff; 
+				
 	}
 	
 	// light 2
 	{
-		vec3 vl = normalize( lightPos[2] - p );
+		vec3 vl = lightPos[2] - p;
+		float lengthLightVector = length(vl);
+		vl = normalize( vl );
 		
 		float shadow = 1.0;
 		if (doShadows)
 			shadow = softShadow( p, vl );
+			
+		float dotNL = saturate( dot( n, vl ) );
 		
-		final += radiance( n, vl, ve, roughness, mDiff, mSpec, light02Color * shadow );
+		vec3 irradiance = dotNL * light02Color * shadow;
+		
+		final += irradiance * BRDF_Specular_GGX( vl, n, viewDirection, mSpec, roughness ) + irradiance * orenNayarDiffuse( vl, n, viewDirection, 0.5, 1.0 ) * mDiff; 
+				
 	}
 
 	return final;
@@ -502,7 +538,7 @@ void main( void )
     	vec3 rayDir = normalize(camUV.x * camRight * uULen + camUV.y * camUp * uVLen + camForward);
 	// jittering
 	rayDir += ( vec3( hash11(sin(time+screenPos.x)), hash11(cos(time+screenPos.y)), hash11(cos(time+screenPos.x)) ) * 0.003 );
-	//camPos += ( vec3( hash11(sin(time+screenPos.y)), hash11(cos(time+screenPos.x)), hash11(cos(time+screenPos.y)) ) * 0.01 );
+	camPos += ( vec3( hash11(sin(time)), hash11(cos(time)), hash11(sin(time)) ) * 0.01 );
 	
 	vec3 normal = vec3( 0.0 );
 	
@@ -518,18 +554,18 @@ void main( void )
 	
 	vec3 specularReflectDir = vec3( 0.0 );
 	vec3 diffuseReflectDir = vec3( 0.0 );
+	vec3 lightPower = vec3(1.0); //TODO: change to intensity or power through Three.js params
 	
-	
-	vec3 linearColor = vec3( 0.0 );
+	vec3 pixelColor = vec3( 0.0 );
 	vec3 finalColor = vec3( 0.0 );
 	
 	lightPos[0] = vec3(uLightMatrix[0][0][0], uLightMatrix[0][0][1], uLightMatrix[0][0][2]);
 	lightPos[1] = vec3(uLightMatrix[1][0][0], uLightMatrix[1][0][1], uLightMatrix[1][0][2]);
 	lightPos[2] = vec3(uLightMatrix[2][0][0], uLightMatrix[2][0][1], uLightMatrix[2][0][2]);
 	
-	light00Color = vec3( uLightMatrix[0][1][0], uLightMatrix[0][1][1], uLightMatrix[0][1][2] );
-    	light01Color = vec3( uLightMatrix[1][1][0], uLightMatrix[1][1][1], uLightMatrix[1][1][2] );
-	light02Color = vec3( uLightMatrix[2][1][0], uLightMatrix[2][1][1], uLightMatrix[2][1][2] );
+	light00Color = lightPower * vec3( uLightMatrix[0][1][0], uLightMatrix[0][1][1], uLightMatrix[0][1][2] );
+    	light01Color = lightPower * vec3( uLightMatrix[1][1][0], uLightMatrix[1][1][1], uLightMatrix[1][1][2] );
+	light02Color = lightPower * vec3( uLightMatrix[2][1][0], uLightMatrix[2][1][1], uLightMatrix[2][1][2] );
 	
 	float roughness = 0.0;
 	float opacity = 0.0;
@@ -537,7 +573,7 @@ void main( void )
 	float distFromCamera = 0.0;
 	float reflectedDistFromCamera = 0.0;
 	
-	// raymarching
+	// initial raycast
 	float delta = 0.1;
 	vec2 res = vec2( 0.0 );
 
@@ -562,69 +598,64 @@ void main( void )
 	distFromCamera = length( pos - camPos );
 	if ( distFromCamera > MAX_RENDER_DISTANCE )
 	{
-		linearColor = vec3(0.0);
+		pixelColor = vec3(0.0);
 		res.y = -5.0;
 	}
 	
 	// check if we hit a light source
-	else if ( res.y == -1.0 ) linearColor = light00Color;
-	else if ( res.y == -2.0 ) linearColor = light01Color;
-	else if ( res.y == -3.0 ) linearColor = light02Color;
+	if ( res.y == -1.0 ) pixelColor = light00Color / lightPower;
+	if ( res.y == -2.0 ) pixelColor = light01Color / lightPower;
+	if ( res.y == -3.0 ) pixelColor = light02Color / lightPower;
 	
 	
 	// if we didn't hit a light source and res.y is positive, then shade this hitpoint
 	if ( res.y >= 0.0 )
-	{
-		
-		// compute initial linearColor
-    		
+	{	
+
 		normal = computeSurfaceNormal( pos );
-    					
-		linearColor = shading( pos, normal, camPos, materialMatrix, res.y, true );
+		
+    		// compute first intersection material color			 
+		//if (res.y == 4.0) // override shading because this is transparent glass	
+		//	pixelColor = vec3( 0.0, 0.5, 0.2 );
+		//else 
+			pixelColor = shading( pos, normal, camPos, materialMatrix, res.y, true );
 		
 		// REFLECTION
-		{
-			// compute reflected color
-			specularReflectDir = reflect(rayDir, normal);
-			diffuseReflectDir = cosWeightedRandomHemisphereDirection( normal, camUV );
-			
-			reflectedDir = mix( specularReflectDir, diffuseReflectDir, roughness );
-			
-			// reflection raymarching
-			delta = 0.01;
-			res = vec2( 0.0 );
-	
-    			for( int i = 0; i < MAX_REFLECTION_ITERATIONS; i++ ) 
-			{
-        			res = getDistToNearestObj( pos + reflectedDir * delta, false );
-        			//if ( res.x < EPSILON || delta > MAX_RENDER_DISTANCE ) break;
-				//if ( res.x < EPSILON ) break;
-        			delta += res.x;
-    			}
-			
-			reflectedPos = pos + reflectedDir * delta;
-			
-			// check if the ray didn't hit anything
-			reflectedDistFromCamera = length( reflectedPos - camPos );
-			if ( reflectedDistFromCamera > MAX_RENDER_DISTANCE )
-			{
-				reflectedColor = vec3(0.0);
-				res.y = -5.0;
-			}
-			
-			if ( res.y >= 0.0 )
-			{
-				// get current material
-				materialMatrix = getMaterialMatrix( res.y );
-
-				reflectionNormal = computeSurfaceNormal( reflectedPos );
-
-				// add reflected color to original linearColor
-				reflectedColor = shading( reflectedPos, reflectionNormal, camPos, materialMatrix, res.y, false  );
-			}
-			
 		
+		// compute reflected color
+		specularReflectDir = reflect(rayDir, normal);
+		diffuseReflectDir = cosWeightedRandomHemisphereDirection( normal, camUV );
+			
+		reflectedDir = mix( specularReflectDir, diffuseReflectDir, roughness * 0.5 );
+			
+		// reflection raymarching
+		delta = 0.01;
+		res = vec2( 0.0 );
+	
+    		for( int i = 0; i < MAX_REFLECTION_ITERATIONS; i++ ) 
+		{
+        		res = getDistToNearestObj( pos + reflectedDir * delta, false );
+        		//if ( res.x < EPSILON || delta > MAX_RENDER_DISTANCE ) break;
+			//if ( res.x < EPSILON ) break;
+        		delta += res.x;
+    		}
+			
+		reflectedPos = pos + reflectedDir * delta;
+			
+			
+		if ( res.y >= 0.0 )
+		{
+			// get current material
+			materialMatrix = getMaterialMatrix( res.y );
+
+			reflectionNormal = computeSurfaceNormal( reflectedPos );
+				
+			reflectedColor = shading( reflectedPos, reflectionNormal, pos, materialMatrix, res.y, false  );
+	                
+			// yellow tinted reflection test
+			//reflectedColor *= vec3(1.0,1.0,0.0);
 		}
+			
 		
 		
 		// REFRACTION
@@ -668,13 +699,6 @@ void main( void )
 			
 			refractedPos = refractedPos + refractedDir * delta;
 			
-			// check if the ray didn't hit anything
-			reflectedDistFromCamera = length( refractedPos - camPos );
-			if ( reflectedDistFromCamera > MAX_RENDER_DISTANCE )
-			{
-				refractedColor = vec3(0.0);
-				res.y = -5.0;
-			}
 			
 			if ( res.y >= 0.0 )
 			{
@@ -683,38 +707,46 @@ void main( void )
 
 				refractionNormal = computeSurfaceNormal( refractedPos );
 
-				// add reflected color to original linearColor
-				refractedColor = shading( refractedPos, refractionNormal, camPos, materialMatrix, res.y, false );
+				
+				refractedColor = shading( refractedPos, refractionNormal, pos, materialMatrix, res.y, false );
+				
 			}
 			
 			
 			//TODO the following is not correct, just something to be able to see both colors
-			reflectedColor = (reflectedColor * 0.1) + (refractedColor * 0.9); 
+			// refracted glass material gives a green tint to the transmitted ray 
+			reflectedColor = ( (reflectedColor * 0.1) + (refractedColor * 0.9) ) * vec3(0.0, 1.0, 1.0);
+			
+				  
 		}
 			
 	}
 	
 	
-	// TODO add fresnel factor instead of roughness
-	linearColor = mix(reflectedColor * 0.9, linearColor, 0.5);
 	
+	pixelColor += reflectedColor;
 	
-	//linearColor = clamp( linearColor, 0.0, 1.0 );
+	pixelColor = clamp( pixelColor, 0.0, 1.0 );
+	
 	
 	// post processing
 	
 	// global color intensity is attenuated by distance from camera
-	///linearColor = mix( linearColor, vec3(0.0,0.0,0.0), 1.0 - exp2(-0.1 * (distFromCamera) ) );
+	///pixelColor = mix( pixelColor, vec3(0.0,0.0,0.0), 1.0 - exp2(-0.1 * (distFromCamera) ) );
 	
 	// Gamma correction
-	finalColor = sqrt( linearColor ); 
-	//finalColor = pow( linearColor, vec3( 1.0 / screenGamma ) );
+	finalColor = sqrt( pixelColor ); 
+	//finalColor = pow( pixelColor, vec3( 1.0 / screenGamma ) );
 		
     	//gl_FragColor = mix( texture2D(tPreviousTexture, vUv), vec4(finalColor, 1.0), 0.05 );
-	// Motion Blur
-	gl_FragColor = (texture2D(tPreviousTexture, vUv) * 0.91) + (vec4(finalColor, 1.0) * 0.1);
+	
+	// Motion Blur, Slow Converging
+	finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.9) + finalColor * 0.1;//*0.9,*0.05
+	
 	// Fast Converging
-	//gl_FragColor = (texture2D(tPreviousTexture, vUv) * 0.5) + (vec4(finalColor, 1.0) * 0.5);
+	//finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.8) + finalColor * 0.2;
+	
+	gl_FragColor = vec4(finalColor,1.0);
 }
 
 		</script>
@@ -739,7 +771,7 @@ void main( void )
 			var fovScale;
 			var frameTime, elapsedTime;
 			var rttUniforms;
-			var pixelRatio = 0.4;
+			var pixelRatio = 0.5;
 			var TWO_PI = Math.PI * 2;
 			var rotationalAmount = 2.0;
 			var rotationalAxis = new THREE.Vector3(0,1,0);
@@ -846,8 +878,8 @@ void main( void )
 				groundGeometry = new THREE.PlaneBufferGeometry(1000, 1000, 1, 1);
 				checkeredMaterial = new THREE.MeshPhongMaterial( {
 					color: new THREE.Color(0.8, 0.8, 0.8), //RGB, ranging from 0.0 - 1.0
-					//roughness: 0.2,
-					reflectivity: 0.0, //TODO change reflectivity to roughness
+					//roughness: 0.0,
+					reflectivity: 0.04, //TODO change reflectivity to roughness
 					opacity: 1.0,
 					refractionRatio: 0.98
 				} );
@@ -874,7 +906,7 @@ void main( void )
 				blueMaterial = new THREE.MeshPhongMaterial( {
 					color: new THREE.Color(0.0, 0.0, 0.5), //RGB, ranging from 0.0 - 1.0
 					//roughness: 0.01,
-					reflectivity: 0.01, //TODO change reflectivity to roughness
+					reflectivity: 0.5, //TODO change reflectivity to roughness
 					opacity: 1.0,
 					refractionRatio: 0.98
 				} );
@@ -897,21 +929,21 @@ void main( void )
 				mirrorMaterial = new THREE.MeshPhongMaterial( {
 					color: new THREE.Color(0.0, 0.0, 0.0), //RGB, ranging from 0.0 - 1.0
 					//roughness: 0.0,
-					reflectivity: 0.0, //TODO change reflectivity to roughness
+					reflectivity: 0.04, //TODO change reflectivity to roughness
 					opacity: 1.0,
 					refractionRatio: 0.98
 				} );
 				whiteMaterial = new THREE.MeshPhongMaterial( {
 					color: new THREE.Color(0.99, 0.99, 0.99), //RGB, from 0.0 - 1.0
 					//roughness: 0.0,
-					reflectivity: 0.0, //TODO change reflectivity to roughness
+					reflectivity: 0.04, //TODO change reflectivity to roughness
 					opacity: 1.0,
 					refractionRatio: 0.98
 				} );
 				glassMaterial = new THREE.MeshPhongMaterial( {
-					color: new THREE.Color(0.0, 1.0, 0.2), //RGB, from 0.0 - 1.0
+					color: new THREE.Color(0.0, 0.0, 0.0), //RGB, from 0.0 - 1.0
 					//roughness: 0.001,
-					reflectivity: 0.001, //TODO change reflectivity to roughness
+					reflectivity: 0.04, //TODO change reflectivity to roughness
 					opacity: 0.01, // 0.01 almost fully transparent
 					refractionRatio: 0.6666 // Air has IndexOfRefraction very near 1.0
 							      // Glass has IndexOfRefraction around 1.5
@@ -1055,7 +1087,7 @@ void main( void )
 			}
 			
 
-			
+			var stopTime = 0.0;
 
 			function animate() {
 
@@ -1063,13 +1095,19 @@ void main( void )
 
 				//frameTime = clock.getDelta();
 				elapsedTime = clock.getElapsedTime() % 1000;
-				//elapsedTime = performance.now() * 0.001;
 				
 				rttUniforms.time.value = elapsedTime;
 				
-				// just testing progressiveness of PathTracing
+				
 				//elapsedTime = 18.0;
-					
+				
+				// just testing progressiveness of PathTracing
+				if (elapsedTime % 5.0 < 0.05) {
+					stopTime += 1.0;
+				}
+				elapsedTime = stopTime;
+						
+			
 				// LIGHTS
 				pointLight00.position.set( Math.sin(elapsedTime * 0.2)*10.0, 4.0, -5.0);
 				rttUniforms.uLightMatrix.value[0].elements[0] = pointLight00.position.x;
