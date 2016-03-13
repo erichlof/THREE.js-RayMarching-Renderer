@@ -122,6 +122,9 @@ varying vec2 vUv;
 #define HASHSCALE3 		  443.8975
 
 #define saturate(a) clamp( a, 0.0, 1.0 )
+float pow2( const in float x ) { return x*x; }
+float pow3( const in float x ) { return x*x*x; }
+float pow4( const in float x ) { float x2 = x*x; return x2*x2; }
 
 // globals
 vec3 lightPos[3];
@@ -376,42 +379,41 @@ float orenNayarDiffuse (
   	return albedo * max(0.0, NdotL) * (A + B * s / t) * RECIPROCAL_PI;
 }
 
+vec3 F_Schlick( const in vec3 specularColor, const in float dotLH ) {
 
-vec3 F_Schlick( vec3 specularColor, float dotLH )
-{
+	// Original approximation by Christophe Schlick '94
+	//;float fresnel = pow( 1.0 - dotLH, 5.0 );
 
+	// Optimized variant (presented by Epic at SIGGRAPH '13)
 	float fresnel = exp2( ( -5.55473 * dotLH - 6.98316 ) * dotLH );
 
 	return ( 1.0 - specularColor ) * fresnel + specularColor;
 
-} // validated
+}
 
+float G_GGX_Smith( const in float alpha, const in float dotNL, const in float dotNV ) {
 
-float G_GGX_Smith( float alpha, float dotNL, float dotNV ) 
-{
+	float a2 = alpha * alpha;
 
-	float a2 = alpha;
+	float gl = dotNL + pow( a2 + ( 1.0 - a2 ) * pow2( dotNL ), 0.5 );
 
-	float gl = max( 0.00001, dotNL + pow( a2 + ( 1.0 - a2 ) * dotNL * dotNL, 0.5 ) );
+	float gv = dotNV + pow( a2 + ( 1.0 - a2 ) * pow2( dotNV ), 0.5 );
 
-	float gv = max( 0.00001, dotNV + pow( a2 + ( 1.0 - a2 ) * dotNV * dotNV, 0.5 ) );
-
-	return 1.0 / ( gl * gv );
+	float denominator = ( gl * gv ) + 0.00001; // avoid possible divide by 0 on the next line
 	
-
-} // validated
-
-
-float D_GGX( float alpha, float dotNH ) {
-
-	float a2 = alpha;
-
-	float denom = dotNH * dotNH * ( a2 - 1.0 ) + 1.0;
-
-	return RECIPROCAL_PI * a2 / ( denom * denom );
+	return 1.0 / denominator;
 
 }
 
+float D_GGX( const in float alpha, const in float dotNH ) {
+
+	float a2 = pow2( alpha );
+
+	float denom = pow2( dotNH ) * ( a2 - 1.0 ) + 1.0; // avoid alpha = 0 with dotNH = 1
+
+	return RECIPROCAL_PI * a2 / pow2( denom );
+
+}
 
 // GGX Distribution, Schlick Fresnel, GGX-Smith Visibility
 vec3 BRDF_Specular_GGX( vec3 lightDirection, vec3 normal, vec3 viewDirection, vec3 specularColor, float roughness ) {
@@ -433,7 +435,7 @@ vec3 BRDF_Specular_GGX( vec3 lightDirection, vec3 normal, vec3 viewDirection, ve
 
 	return F * ( G * D );
 
-} // validated
+}
 
 
 // shading
@@ -537,8 +539,8 @@ void main( void )
 	
     	vec3 rayDir = normalize(camUV.x * camRight * uULen + camUV.y * camUp * uVLen + camForward);
 	// jittering
-	rayDir += ( vec3( hash11(sin(time+screenPos.x)), hash11(cos(time+screenPos.y)), hash11(cos(time+screenPos.x)) ) * 0.003 );
-	camPos += ( vec3( hash11(sin(time)), hash11(cos(time)), hash11(sin(time)) ) * 0.01 );
+	rayDir += ( vec3( hash11(sin(time+screenPos.x)), hash11(cos(time+screenPos.y)), hash11(cos(time+screenPos.x * screenPos.y)) ) * 0.005 );
+	//camPos += ( vec3( hash11(sin(time)), hash11(cos(time)), hash11(sin(time)) ) * 0.01 );
 	
 	vec3 normal = vec3( 0.0 );
 	
@@ -741,7 +743,7 @@ void main( void )
     	//gl_FragColor = mix( texture2D(tPreviousTexture, vUv), vec4(finalColor, 1.0), 0.05 );
 	
 	// Motion Blur, Slow Converging
-	finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.9) + finalColor * 0.1;//*0.9,*0.05
+	finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.95) + finalColor * 0.1;
 	
 	// Fast Converging
 	//finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.8) + finalColor * 0.2;
@@ -771,13 +773,13 @@ void main( void )
 			var fovScale;
 			var frameTime, elapsedTime;
 			var rttUniforms;
-			var pixelRatio = 0.5;
+			var pixelRatio = 0.8;
 			var TWO_PI = Math.PI * 2;
 			var rotationalAmount = 2.0;
 			var rotationalAxis = new THREE.Vector3(0,1,0);
 			var cameraDirectionVec = new THREE.Vector3();
 			var swap = false;
-			
+			var clearScreenFlag = false;
 			
 			init();
 			animate();
@@ -1087,7 +1089,7 @@ void main( void )
 			}
 			
 
-			var stopTime = 0.0;
+			var stopTime = 10.0;
 
 			function animate() {
 
@@ -1102,8 +1104,9 @@ void main( void )
 				//elapsedTime = 18.0;
 				
 				// just testing progressiveness of PathTracing
-				if (elapsedTime % 5.0 < 0.05) {
+				if (elapsedTime % 6.0 < 0.05) {
 					stopTime += 1.0;
+					clearScreenFlag = true;
 				}
 				elapsedTime = stopTime;
 						
@@ -1149,11 +1152,16 @@ void main( void )
 				rttUniforms.uSphereMeshMatrix.value[2].getInverse(sphereMesh[2].matrixWorld);
 				rttUniforms.uSphereMeshMatrix.value[3].getInverse(sphereMesh[3].matrixWorld);
 				
+
 				// CAMERA
 				rttCamera.position.set( (Math.sin(elapsedTime * 0.25)) * 8, 3 + (2.5 * Math.sin(elapsedTime * 0.2)), 1 );
 				//rttCamera.position.set( 0, 0, (Math.sin(elapsedTime)) * 10.0 + 10.0 );
 				//rttCamera.position.set( (Math.sin(elapsedTime * 0.2)) * 10.0, 4, (Math.cos(elapsedTime * 0.2)) * 10.0 );
 				
+				if (clearScreenFlag) {
+					rttCamera.position.set(10000,10000,10000);
+					clearScreenFlag = false;
+				}
 				//rttCamera.lookAt(boxMesh.position);
 				rttCamera.lookAt(sceneRTT.position);
 				//rttCamera.updateMatrixWorld(true);
