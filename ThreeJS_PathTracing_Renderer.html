@@ -41,7 +41,7 @@
 		<!-- <script src="js/three-r74.js"></script> -->
 		
 		<!-- for Release -->
-		<script src="js/three-r74.min.js"></script>
+		<script src="js/three-r75.min.js"></script>
 		
 		<script src="js/Detector.js"></script>
 		<script src="js/stats.min.js"></script>
@@ -357,6 +357,12 @@ float softShadow( vec3 ro, vec3 rd )
     	return clamp( res, 0.1, 1.0 );
 }
 
+vec3 BRDF_Diffuse_Lambert( const in vec3 diffuseColor ) {
+
+	return RECIPROCAL_PI * diffuseColor;
+
+} // validated
+
 float orenNayarDiffuse (
   	vec3 lightDirection,
   	vec3 surfaceNormal,
@@ -377,9 +383,11 @@ float orenNayarDiffuse (
   	float B = 0.45 * sigma2 / (sigma2 + 0.09);
 
   	return albedo * max(0.0, NdotL) * (A + B * s / t) * RECIPROCAL_PI;
+	
 }
 
-vec3 F_Schlick( const in vec3 specularColor, const in float dotLH ) {
+vec3 F_Schlick( const in vec3 specularColor, const in float dotLH )
+{
 
 	// Original approximation by Christophe Schlick '94
 	//;float fresnel = pow( 1.0 - dotLH, 5.0 );
@@ -391,21 +399,20 @@ vec3 F_Schlick( const in vec3 specularColor, const in float dotLH ) {
 
 }
 
-float G_GGX_Smith( const in float alpha, const in float dotNL, const in float dotNV ) {
+float G_GGX_SmithCorrelated( const in float alpha, const in float dotNL, const in float dotNV )
+{
 
-	float a2 = alpha * alpha;
+	float a2 = pow2( alpha );
 
-	float gl = dotNL + pow( a2 + ( 1.0 - a2 ) * pow2( dotNL ), 0.5 );
+	// dotNL and dotNV are explicitly swapped. This is not a mistake.
+	float gv = dotNL * sqrt( a2 + ( 1.0 - a2 ) * pow2( dotNV ) );
+	float gl = dotNV * sqrt( a2 + ( 1.0 - a2 ) * pow2( dotNL ) );
 
-	float gv = dotNV + pow( a2 + ( 1.0 - a2 ) * pow2( dotNV ), 0.5 );
-
-	float denominator = ( gl * gv ) + 0.00001; // avoid possible divide by 0 on the next line
-	
-	return 1.0 / denominator;
-
+	return 0.5 / max( gv + gl, EPSILON );
 }
 
-float D_GGX( const in float alpha, const in float dotNH ) {
+float D_GGX( const in float alpha, const in float dotNH )
+{
 
 	float a2 = pow2( alpha );
 
@@ -416,9 +423,10 @@ float D_GGX( const in float alpha, const in float dotNH ) {
 }
 
 // GGX Distribution, Schlick Fresnel, GGX-Smith Visibility
-vec3 BRDF_Specular_GGX( vec3 lightDirection, vec3 normal, vec3 viewDirection, vec3 specularColor, float roughness ) {
+vec3 BRDF_Specular_GGX( vec3 lightDirection, vec3 normal, vec3 viewDirection, vec3 specularColor, float roughness )
+{
 
-	float alpha = roughness * roughness;
+	float alpha = pow2( roughness ); // UE4's roughness
 
 	vec3 halfDir = normalize( lightDirection + viewDirection );
 
@@ -429,7 +437,7 @@ vec3 BRDF_Specular_GGX( vec3 lightDirection, vec3 normal, vec3 viewDirection, ve
 
 	vec3 F = F_Schlick( specularColor, dotLH );
 
-	float G = G_GGX_Smith( alpha, dotNL, dotNV );
+	float G = G_GGX_SmithCorrelated( alpha, dotNL, dotNV );
 
 	float D = D_GGX( alpha, dotNH );
 
@@ -437,18 +445,62 @@ vec3 BRDF_Specular_GGX( vec3 lightDirection, vec3 normal, vec3 viewDirection, ve
 
 }
 
+vec3 RE_Direct_Standard( vec3 lightDirection, vec3 lightColor, vec3 normal, vec3 viewDirection, vec3 diffuseColor, vec3 specularColor, float roughness )
+{
+
+	float dotNL = saturate( dot( normal, lightDirection ) );
+
+	vec3 irradiance = dotNL * lightColor;
+	
+	vec3 reflectedLight = vec3(0.0);
+
+
+		irradiance *= PI; // punctual light
+
+
+	reflectedLight += irradiance * BRDF_Diffuse_Lambert( diffuseColor );
+
+	reflectedLight += irradiance * BRDF_Specular_GGX( lightDirection, normal, viewDirection, specularColor, roughness );
+	
+	return reflectedLight;
+
+}
+
+bool testLightInRange( const in float lightDistance, const in float cutoffDistance )
+{
+
+	return any( bvec2( cutoffDistance == 0.0, lightDistance < cutoffDistance ) );
+
+}
+
+float punctualLightIntensityToIrradianceFactor( const in float lightDistance, const in float cutoffDistance, const in float decayExponent )
+{
+	
+	float distanceFalloff = 1.0 / max( pow( lightDistance, decayExponent ), 0.01 );
+	float maxDistanceCutoffFactor = pow2( saturate( 1.0 - pow4( lightDistance / cutoffDistance ) ) );
+	return distanceFalloff * maxDistanceCutoffFactor;
+	
+}
+
 
 // shading
-vec3 shading( vec3 p, vec3 n, vec3 eyePos, mat3 materialMatrix , float materialID, bool doShadows )
+vec3 shading( vec3 p, vec3 n, vec3 eyePos, mat3 materialMatrix, float materialID, bool doShadows )
 {
+	
 	// material
-	float roughness = materialMatrix[1][0];
 	vec3 mDiff = vec3( materialMatrix[0][0], materialMatrix[0][1], materialMatrix[0][2] );
-	vec3 mSpec = vec3(0.5);
+	vec3 mSpec = vec3(0.0);
+	float metalnessFactor = 0.2;
+	float roughness = materialMatrix[1][0];
+	roughness = clamp( roughness, 0.04, 1.0 );
+	
+	mDiff *= ( 1.0 - metalnessFactor );
+	mSpec = mix( vec3( 0.04 ), mDiff, metalnessFactor );
 	
 	vec3 viewDirection = normalize( eyePos - p );
 	vec3 ambient = vec3( 0.0 );
-	vec3 final = vec3( 0.0 );
+	vec3 directLightColor = vec3( 0.0 );
+	vec3 totalReflectedLight = vec3( 0.0 );
 	
 	// do checkerBoard pattern on floor
 	if ( materialID == 0.0 )
@@ -464,63 +516,79 @@ vec3 shading( vec3 p, vec3 n, vec3 eyePos, mat3 materialMatrix , float materialI
 		mDiff *= pattern;
 	}
 
-	
 	// light 0
 	{
-		vec3 vl = lightPos[0] - p;
-		float lengthLightVector = length(vl);
-		vl = normalize( vl );
+		vec3 lightDirection = lightPos[0] - p;
+		float lightDistance = length( lightDirection );
+		lightDirection = normalize( lightDirection );
 		
 		float shadow = 1.0;
 		if (doShadows) 
-			shadow = softShadow( p, vl );
-		
-		float dotNL = saturate( dot( n, vl ) );
+			shadow = softShadow( p, lightDirection );
 			
-		vec3 irradiance = dotNL * light00Color * shadow;
+		if ( testLightInRange( lightDistance, 100.0 ) ) 
+		{
+			directLightColor = light00Color;
+			//test
+			//directLightColor = vec3(1.0);
+			
+			directLightColor *= punctualLightIntensityToIrradianceFactor( lightDistance, 100.0, 2.0 );
+			directLightColor *= shadow;
+		} else
+		{
+			directLightColor = vec3( 0.0 );
+		}
 		
-		final += irradiance * BRDF_Specular_GGX( vl, n, viewDirection, mSpec, roughness ) + irradiance * orenNayarDiffuse( vl, n, viewDirection, 0.5, 1.0 ) * mDiff; 
-				
-				
+		totalReflectedLight += RE_Direct_Standard( lightDirection, directLightColor, n, viewDirection, mDiff, mSpec, roughness );			
 	}
 	
 	// light 1
 	{
-		vec3 vl = lightPos[1] - p;
-		float lengthLightVector = length(vl);
-		vl = normalize( vl );
+		vec3 lightDirection = lightPos[1] - p;
+		float lightDistance = length( lightDirection );
+		lightDirection = normalize( lightDirection );
 		
 		float shadow = 1.0;
 		if (doShadows) 
-			shadow = softShadow( p, vl );
+			shadow = softShadow( p, lightDirection );
 			
-		float dotNL = saturate( dot( n, vl ) );
+		if ( testLightInRange( lightDistance, 100.0 ) ) 
+		{
+			directLightColor = light01Color;
+			directLightColor *= punctualLightIntensityToIrradianceFactor( lightDistance, 100.0, 2.0 );
+			directLightColor *= shadow;
+		} else
+		{
+			directLightColor = vec3( 0.0 );
+		}
 		
-		vec3 irradiance = dotNL * light01Color * shadow;
-		
-		final += irradiance * BRDF_Specular_GGX( vl, n, viewDirection, mSpec, roughness ) + irradiance * orenNayarDiffuse( vl, n, viewDirection, 0.5, 1.0 ) * mDiff; 
-				
+		totalReflectedLight += RE_Direct_Standard( lightDirection, directLightColor, n, viewDirection, mDiff, mSpec, roughness );			
 	}
 	
 	// light 2
 	{
-		vec3 vl = lightPos[2] - p;
-		float lengthLightVector = length(vl);
-		vl = normalize( vl );
+		vec3 lightDirection = lightPos[2] - p;
+		float lightDistance = length( lightDirection );
+		lightDirection = normalize( lightDirection );
 		
 		float shadow = 1.0;
-		if (doShadows)
-			shadow = softShadow( p, vl );
+		if (doShadows) 
+			shadow = softShadow( p, lightDirection );
 			
-		float dotNL = saturate( dot( n, vl ) );
+		if ( testLightInRange( lightDistance, 100.0 ) ) 
+		{
+			directLightColor = light02Color;
+			directLightColor *= punctualLightIntensityToIrradianceFactor( lightDistance, 100.0, 2.0 );
+			directLightColor *= shadow;
+		} else
+		{
+			directLightColor = vec3( 0.0 );
+		}
 		
-		vec3 irradiance = dotNL * light02Color * shadow;
-		
-		final += irradiance * BRDF_Specular_GGX( vl, n, viewDirection, mSpec, roughness ) + irradiance * orenNayarDiffuse( vl, n, viewDirection, 0.5, 1.0 ) * mDiff; 
-				
+		totalReflectedLight += RE_Direct_Standard( lightDirection, directLightColor, n, viewDirection, mDiff, mSpec, roughness );			
 	}
-
-	return final;
+	
+	return totalReflectedLight;
 }
 
 
@@ -556,7 +624,6 @@ void main( void )
 	
 	vec3 specularReflectDir = vec3( 0.0 );
 	vec3 diffuseReflectDir = vec3( 0.0 );
-	vec3 lightPower = vec3(1.0); //TODO: change to intensity or power through Three.js params
 	
 	vec3 pixelColor = vec3( 0.0 );
 	vec3 finalColor = vec3( 0.0 );
@@ -565,9 +632,9 @@ void main( void )
 	lightPos[1] = vec3(uLightMatrix[1][0][0], uLightMatrix[1][0][1], uLightMatrix[1][0][2]);
 	lightPos[2] = vec3(uLightMatrix[2][0][0], uLightMatrix[2][0][1], uLightMatrix[2][0][2]);
 	
-	light00Color = lightPower * vec3( uLightMatrix[0][1][0], uLightMatrix[0][1][1], uLightMatrix[0][1][2] );
-    	light01Color = lightPower * vec3( uLightMatrix[1][1][0], uLightMatrix[1][1][1], uLightMatrix[1][1][2] );
-	light02Color = lightPower * vec3( uLightMatrix[2][1][0], uLightMatrix[2][1][1], uLightMatrix[2][1][2] );
+	light00Color = uLightMatrix[0][0][3] * vec3( uLightMatrix[0][1][0], uLightMatrix[0][1][1], uLightMatrix[0][1][2] );
+    	light01Color = uLightMatrix[1][0][3] * vec3( uLightMatrix[1][1][0], uLightMatrix[1][1][1], uLightMatrix[1][1][2] );
+	light02Color = uLightMatrix[2][0][3] * vec3( uLightMatrix[2][1][0], uLightMatrix[2][1][1], uLightMatrix[2][1][2] );
 	
 	float roughness = 0.0;
 	float opacity = 0.0;
@@ -605,9 +672,9 @@ void main( void )
 	}
 	
 	// check if we hit a light source
-	if ( res.y == -1.0 ) pixelColor = light00Color / lightPower;
-	if ( res.y == -2.0 ) pixelColor = light01Color / lightPower;
-	if ( res.y == -3.0 ) pixelColor = light02Color / lightPower;
+	if ( res.y == -1.0 ) pixelColor = light00Color / uLightMatrix[0][0][3];
+	if ( res.y == -2.0 ) pixelColor = light01Color / uLightMatrix[1][0][3];
+	if ( res.y == -3.0 ) pixelColor = light02Color / uLightMatrix[2][0][3];
 	
 	
 	// if we didn't hit a light source and res.y is positive, then shade this hitpoint
@@ -1003,43 +1070,45 @@ void main( void )
 				
 				// TODO make lights.visible = false?
 				// Lights
-				pointLight00 = new THREE.PointLight();
 				// Blue light
-				pointLight00.color.setRGB(0.0, 0.0, 1.0);//RGB, ranging from 0.0-1.0
-				pointLight00.intensity = 50;
+				pointLight00 = new THREE.PointLight('rgb(0,0,255)', 1, 100, 2);
+				pointLight00.power = 40;
 				sceneRTT.add(pointLight00);
-				
-				pointLight01 = new THREE.PointLight();
 				// White light
-				pointLight01.color.setRGB(1.0, 1.0, 1.0);//RGB, ranging from 0.0-1.0
-				pointLight01.intensity = 25; // less intensity due to all rgb values at max
+				pointLight01 = new THREE.PointLight('rgb(255,255,255)', 1, 100, 2);
+				pointLight01.power = 40;
 				sceneRTT.add(pointLight01);
-				
-				pointLight02 = new THREE.PointLight();
 				// Red light
-				pointLight02.color.setRGB(1.0, 0.0, 0.0);//RGB, ranging from 0.0-1.0
-				pointLight02.intensity = 50;
+				pointLight02 = new THREE.PointLight('rgb(255,0,0)', 1, 100, 2);
+				pointLight02.power = 40;
 				sceneRTT.add(pointLight02);
+				
 				
 				rttUniforms.uLightMatrix.value[0] = new THREE.Matrix4();
 				rttUniforms.uLightMatrix.value[1] = new THREE.Matrix4();
 				rttUniforms.uLightMatrix.value[2] = new THREE.Matrix4();
 				
 				
-				rttUniforms.uLightMatrix.value[0].elements[3] = pointLight00.intensity;
+				rttUniforms.uLightMatrix.value[0].elements[3] = pointLight00.power;
 				rttUniforms.uLightMatrix.value[0].elements[4] = pointLight00.color.r;
 				rttUniforms.uLightMatrix.value[0].elements[5] = pointLight00.color.g;
 				rttUniforms.uLightMatrix.value[0].elements[6] = pointLight00.color.b;
+				rttUniforms.uLightMatrix.value[0].elements[7] = pointLight00.intensity;
+				rttUniforms.uLightMatrix.value[0].elements[8] = pointLight00.distance;
 				
-				rttUniforms.uLightMatrix.value[1].elements[3] = pointLight01.intensity;
+				rttUniforms.uLightMatrix.value[1].elements[3] = pointLight01.power;
 				rttUniforms.uLightMatrix.value[1].elements[4] = pointLight01.color.r;
 				rttUniforms.uLightMatrix.value[1].elements[5] = pointLight01.color.g;
 				rttUniforms.uLightMatrix.value[1].elements[6] = pointLight01.color.b;
+				rttUniforms.uLightMatrix.value[1].elements[7] = pointLight01.intensity;
+				rttUniforms.uLightMatrix.value[1].elements[8] = pointLight01.distance;
 				
-				rttUniforms.uLightMatrix.value[2].elements[3] = pointLight02.intensity;
+				rttUniforms.uLightMatrix.value[2].elements[3] = pointLight02.power;
 				rttUniforms.uLightMatrix.value[2].elements[4] = pointLight02.color.r;
 				rttUniforms.uLightMatrix.value[2].elements[5] = pointLight02.color.g;
 				rttUniforms.uLightMatrix.value[2].elements[6] = pointLight02.color.b;
+				rttUniforms.uLightMatrix.value[2].elements[7] = pointLight02.intensity;
+				rttUniforms.uLightMatrix.value[2].elements[8] = pointLight02.distance;
 				
 				
 				screenGeometry = new THREE.PlaneBufferGeometry( 2, 2 );
