@@ -786,7 +786,7 @@ void main( void )
 	
     	vec3 rayDir = normalize(camUV.x * camRight * uULen + camUV.y * camUp * uVLen + camForward);
 	// jittering
-	rayDir += ( vec3( hash11(sin(time+screenPos.x)), hash11(cos(time+screenPos.y)), hash11(cos(time+screenPos.x * screenPos.y)) ) * 0.005 );
+	rayDir += ( vec3( hash11(sin(time+screenPos.x)), hash11(cos(time+screenPos.y)), hash11(cos(time+screenPos.x * screenPos.y)) ) * 0.003 );
 	//camPos += ( vec3( hash11(sin(time)), hash11(cos(time)), hash11(sin(time)) ) * 0.01 );
 	//camPos += ( vec3( 0.0, hash11(cos(time)), hash11(sin(time)) ) * 0.006 );
 	
@@ -810,7 +810,7 @@ void main( void )
 	vec3 finalColor = sqrt( pixelColor ); 
 	//finalColor = pow( pixelColor, vec3( 1.0 / screenGamma ) );
 		
-    	finalColor = mix( finalColor, texture2D(tPreviousTexture, vUv).rgb, min(uFrameCounter,0.95) );
+    	finalColor = mix( finalColor, texture2D(tPreviousTexture, vUv).rgb, min(uFrameCounter, 0.98) );
 	
 	// Slowest Converging, Max Motion Blur if animated
 	//finalColor = ( texture2D(tPreviousTexture, vUv).rgb * clamp(uFrameCounter, 0.0, 0.92) ) + ( finalColor * max(1.0-uFrameCounter, 0.1) );
@@ -856,7 +856,7 @@ void main( void )
 			var cameraDirectionVec = new THREE.Vector3();
 			var swap = false;
 			var clearScreenFlag = false;
-			var frameCounter = 0.1;
+			var frameCounter = 0.5;
 			
 			
 			init();
@@ -926,7 +926,7 @@ void main( void )
 					resolution: { type: "v2", value: new THREE.Vector2() },
 					
 					time: { type: "f", value: 0.0 },
-					uFrameCounter: { type: "f", value: 0.1 },
+					uFrameCounter: { type: "f", value: 0.0 },
 					uULen: { type: "f", value: 1.0 },
 					uVLen: { type: "f", value: 1.0 },
 					
@@ -1185,7 +1185,7 @@ void main( void )
 				if (frameCounter > 4.0) {
 					stopTime += 2.0;
 					clearScreenFlag = true;
-					frameCounter = 0.1;
+					frameCounter = 0.5;
 				}
 				elapsedTime = stopTime;
 						
