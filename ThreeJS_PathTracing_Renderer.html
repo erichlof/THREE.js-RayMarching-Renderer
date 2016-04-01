@@ -595,12 +595,12 @@ vec3 getPixelColor( vec2 camUV, vec3 camPos, vec3 rayDir )
 	
 	vec3 normal = vec3( 0.0 );
 	
-	vec3 reflectedPos = vec3(0.0);
+	vec3 reflectedPos = vec3( 0.0 );
 	vec3 reflectionNormal = vec3( 0.0 );
 	vec3 reflectedDir = vec3( 0.0 );
 	vec3 reflectedColor = vec3( 0.0 );
 	
-	vec3 refractedPos = vec3(0.0);
+	vec3 refractedPos = vec3( 0.0 );
 	vec3 refractionNormal = vec3( 0.0 );
 	vec3 refractedDir = vec3( 0.0 );
 	vec3 refractedColor = vec3( 0.0 );
@@ -614,10 +614,9 @@ vec3 getPixelColor( vec2 camUV, vec3 camPos, vec3 rayDir )
 	float opacity = 0.0;
 	float refractionRatio = 0.0;
 	float distFromCamera = 0.0;
-	float reflectedDistFromCamera = 0.0;
 	
-	// initial raycast
-	float delta00 = 0.1;
+	// initial raymarching (raycast)
+	float delta00 = 0.001;
 	vec2 res00 = vec2( 0.0 );
 	
 	for( int i = 0; i < MAX_ITERATIONS; i++ ) 
@@ -653,7 +652,7 @@ vec3 getPixelColor( vec2 camUV, vec3 camPos, vec3 rayDir )
 	normal = computeSurfaceNormal( pos );
 		
     	// compute first intersection material color	
-	reflectedColor += shading( pos, normal, camPos, materialMatrix, res00.y, true );
+	reflectedColor += opacity * shading( pos, normal, camPos, materialMatrix, res00.y, true );
 		
 	// REFLECTION
 		
@@ -664,23 +663,22 @@ vec3 getPixelColor( vec2 camUV, vec3 camPos, vec3 rayDir )
 	reflectedDir = mix( specularReflectDir, diffuseReflectDir, roughness * 0.5 );
 			
 	// reflection raymarching
-	float delta01 = 0.01;
+	float delta01 = 0.001;
 	vec2 res01 = vec2( 0.0 );
 	
     	for( int i = 0; i < MAX_REFLECTION_ITERATIONS; i++ ) 
 	{
-        	res01 = getDistToNearestObj( pos + reflectedDir * delta01, false );
-        	if ( res01.x < EPSILON || delta01 > MAX_RENDER_DISTANCE ) break;
-		//if ( res01.x < EPSILON ) break;
+        	res01 = getDistToNearestObj( pos + reflectedDir * delta01, true );
+		if ( res01.x < EPSILON ) break;
         	delta01 += res01.x;
     	}
 			
 	reflectedPos = pos + reflectedDir * delta01;
 	
 	// check if we hit a light source
-	if ( res01.y == -1.0 ) reflectedColor = light00Color / uLightMatrix[0][0][3];
-	if ( res01.y == -2.0 ) reflectedColor = light01Color / uLightMatrix[1][0][3];
-	if ( res01.y == -3.0 ) reflectedColor = light02Color / uLightMatrix[2][0][3];
+	if ( res01.y == -1.0 ) reflectedColor += ( light00Color / uLightMatrix[0][0][3] );
+	if ( res01.y == -2.0 ) reflectedColor += ( light01Color / uLightMatrix[1][0][3] );
+	if ( res01.y == -3.0 ) reflectedColor += ( light02Color / uLightMatrix[2][0][3] );
 			
 	if ( res01.y >= 0.0 )
 	{
@@ -688,11 +686,11 @@ vec3 getPixelColor( vec2 camUV, vec3 camPos, vec3 rayDir )
 		materialMatrix = getMaterialMatrix( res01.y );
 
 		reflectionNormal = computeSurfaceNormal( reflectedPos );
-				
-		reflectedColor += shading( reflectedPos, reflectionNormal, pos, materialMatrix, res01.y, false  );
-	                
-		// yellow tinted reflection test
-		//reflectedColor *= vec3(1.0,1.0,0.0);
+		
+		reflectedColor += 0.5 * shading( reflectedPos, reflectionNormal, pos, materialMatrix, res01.y, false );
+		
+		if ( res00.y == 4.0 ) 
+			reflectedColor *= vec3(0.0,0.06,0.06);
 	}
 	
 		
@@ -702,11 +700,12 @@ vec3 getPixelColor( vec2 camUV, vec3 camPos, vec3 rayDir )
 		
 		// we are entering the glass material
 		refractedDir = refract(rayDir, normal, refractionRatio);
-			
-		float delta02 = 0.01;
+		
+		// refraction raymarching entering
+		float delta02 = 0.001;
 		vec2 res02 = vec2( 0.0 );
 			
-		// trace until we hit the inside of object
+		// trace until we hit the back inside of object
 		for( int i = 0; i < MAX_REFLECTION_ITERATIONS; i++ ) 
 		{
         		res02 = getDistToNearestObj( pos + refractedDir * delta02, false );
@@ -714,28 +713,34 @@ vec3 getPixelColor( vec2 camUV, vec3 camPos, vec3 rayDir )
 			//if ( -res02.x > -EPSILON ) break;		
     		}
 			
-		// we are now trying to exit the glass material
+		// we are now exiting the glass material
 		refractedPos = pos + refractedDir * delta02;	
 		refractionNormal = computeSurfaceNormal( refractedPos );
 			
 		refractedDir = refract(refractedDir, -refractionNormal, 1.0 / refractionRatio);
 			
 		// TODO get weighted random sample and mix with roughness like above (in reflection routine)
-			
-		float delta03 = 0.01;
+		
+		// refraction raymarching exiting
+		float delta03 = 0.001;
 		vec2 res03 = vec2( 0.0 );
 	
 		// trace until we hit another world object and get its color
     		for( int i = 0; i < MAX_REFLECTION_ITERATIONS; i++ ) 
 		{
         		res03 = getDistToNearestObj( refractedPos + refractedDir * delta03, false );
-			if ( res03.x < EPSILON || delta03 > MAX_RENDER_DISTANCE ) break;
-			//if ( res03.x < EPSILON ) break;
+			//if ( res03.x < EPSILON || delta03 > MAX_RENDER_DISTANCE ) break;
+			if ( res03.x < EPSILON ) break;
 			delta03 += res03.x;
     		}
 			
 		refractedPos = refractedPos + refractedDir * delta03;
-			
+		
+		// check if we hit a light source
+		if ( res03.y == -1.0 ) refractedColor += ( light00Color / uLightMatrix[0][0][3] );
+		if ( res03.y == -2.0 ) refractedColor += ( light01Color / uLightMatrix[1][0][3] );
+		if ( res03.y == -3.0 ) refractedColor += ( light02Color / uLightMatrix[2][0][3] );
+	
 		if ( res03.y >= 0.0 )
 		{
 			// get current material
@@ -744,10 +749,11 @@ vec3 getPixelColor( vec2 camUV, vec3 camPos, vec3 rayDir )
 			refractionNormal = computeSurfaceNormal( refractedPos );
 	
 			refractedColor = shading( refractedPos, refractionNormal, pos, materialMatrix, res03.y, false );
-				
+			
 			//TODO the following is not physically correct, just something to be able to see both colors
 			// refracted glass material also gives a green tint to the transmitted ray 
-			reflectedColor = ( (reflectedColor * 0.1) + (refractedColor * 0.9) ) * vec3(0.0, 1.0, 1.0);
+			refractedColor *= vec3(0.0,0.5,0.5);
+			reflectedColor = mix(reflectedColor, refractedColor,0.9);
 				
 		}
 					  
@@ -757,9 +763,9 @@ vec3 getPixelColor( vec2 camUV, vec3 camPos, vec3 rayDir )
 	pixelColor = reflectedColor;
 	
 	// color intensity is attenuated by distance from camera
-	///pixelColor = mix( pixelColor, vec3(0.0,0.0,0.0), 1.0 - exp2(-0.1 * (distFromCamera) ) );
+	pixelColor = mix( vec3(0.0,0.0,0.0), pixelColor, exp2( -distFromCamera * 0.05 ) );
 	
-	pixelColor = clamp( pixelColor, 0.0, 1.0 );
+	//pixelColor = clamp( pixelColor, 0.0, 1.0 );
 	
 	return pixelColor;
 	
@@ -805,10 +811,10 @@ void main( void )
     	//gl_FragColor = mix( texture2D(tPreviousTexture, vUv), vec4(finalColor, 1.0), 0.05 );
 	
 	// Slow Converging, Motion Blur if animated
-	finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.91) + finalColor * 0.1;
+	//finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.91) + finalColor * 0.1;
 	
 	// Fast Converging, slight Motion Blur
-	//finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.8) + finalColor * 0.2;
+	finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.8) + finalColor * 0.2;
 	
 	// Fastest Converging, almost no Motion Blur
 	//finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.5) + finalColor * 0.5;
@@ -838,7 +844,7 @@ void main( void )
 			var fovScale;
 			var frameTime, elapsedTime;
 			var rttUniforms;
-			var pixelRatio = 0.4;
+			var pixelRatio = 0.3;
 			var TWO_PI = Math.PI * 2;
 			var rotationalAmount = 2.0;
 			var rotationalAxis = new THREE.Vector3(0,1,0);
@@ -1006,7 +1012,7 @@ void main( void )
 					refractionRatio: 0.98
 				} );
 				glassMaterial = new THREE.MeshStandardMaterial( {
-					color: new THREE.Color(0.0, 0.0, 0.0), //RGB, from 0.0 - 1.0
+					color: new THREE.Color(0.0, 0.5, 0.5), //RGB, from 0.0 - 1.0
 					roughness: 0.04,
 					metalness: 0.0,
 					opacity: 0.01, // 0.01 almost fully transparent
@@ -1162,14 +1168,14 @@ void main( void )
 				
 				rttUniforms.time.value = elapsedTime;
 				
-				
+				/*
 				// just testing progressiveness of PathTracing
 				if (elapsedTime % 6.0 < 0.05) {
-					stopTime += 1.0;
+					stopTime += 2.0;
 					clearScreenFlag = true;
 				}
 				elapsedTime = stopTime;
-						
+				*/		
 			
 				// LIGHTS
 				pointLight00.position.set( Math.sin(elapsedTime * 0.2)*10.0, 4.0, -5.0);
