@@ -92,6 +92,7 @@ precision highp float;
 
 uniform vec2 resolution;
 uniform float time;
+uniform float uFrameCounter;
 uniform float uULen;
 uniform float uVLen;
 
@@ -112,8 +113,8 @@ varying vec2 vUv;
 
 #define PI		  	  3.14159265359
 #define RECIPROCAL_PI 		  0.31830988618
-#define MAX_ITERATIONS	  	  200
-#define MAX_REFLECTION_ITERATIONS 60
+#define MAX_ITERATIONS	  	  100
+#define MAX_REFLECTION_ITERATIONS 80
 #define MAX_SHADOW_STEPS  	  45
 #define MAX_BOUNCES  	          1
 #define EPSILON           	  0.0001
@@ -616,7 +617,7 @@ vec3 getPixelColor( vec2 camUV, vec3 camPos, vec3 rayDir )
 	float distFromCamera = 0.0;
 	
 	// initial raymarching (raycast)
-	float delta00 = 0.001;
+	float delta00 = 0.1;
 	vec2 res00 = vec2( 0.0 );
 	
 	for( int i = 0; i < MAX_ITERATIONS; i++ ) 
@@ -660,10 +661,10 @@ vec3 getPixelColor( vec2 camUV, vec3 camPos, vec3 rayDir )
 	specularReflectDir = reflect(rayDir, normal);
 	diffuseReflectDir = cosWeightedRandomHemisphereDirection( normal, camUV );
 			
-	reflectedDir = mix( specularReflectDir, diffuseReflectDir, roughness * 0.5 );
+	reflectedDir = mix( specularReflectDir, diffuseReflectDir, roughness * 0.1 );
 			
 	// reflection raymarching
-	float delta01 = 0.001;
+	float delta01 = 0.01;
 	vec2 res01 = vec2( 0.0 );
 	
     	for( int i = 0; i < MAX_REFLECTION_ITERATIONS; i++ ) 
@@ -702,7 +703,7 @@ vec3 getPixelColor( vec2 camUV, vec3 camPos, vec3 rayDir )
 		refractedDir = refract(rayDir, normal, refractionRatio);
 		
 		// refraction raymarching entering
-		float delta02 = 0.001;
+		float delta02 = 0.01;
 		vec2 res02 = vec2( 0.0 );
 			
 		// trace until we hit the back inside of object
@@ -722,7 +723,7 @@ vec3 getPixelColor( vec2 camUV, vec3 camPos, vec3 rayDir )
 		// TODO get weighted random sample and mix with roughness like above (in reflection routine)
 		
 		// refraction raymarching exiting
-		float delta03 = 0.001;
+		float delta03 = 0.01;
 		vec2 res03 = vec2( 0.0 );
 	
 		// trace until we hit another world object and get its color
@@ -787,6 +788,7 @@ void main( void )
 	// jittering
 	rayDir += ( vec3( hash11(sin(time+screenPos.x)), hash11(cos(time+screenPos.y)), hash11(cos(time+screenPos.x * screenPos.y)) ) * 0.005 );
 	//camPos += ( vec3( hash11(sin(time)), hash11(cos(time)), hash11(sin(time)) ) * 0.01 );
+	//camPos += ( vec3( 0.0, hash11(cos(time)), hash11(sin(time)) ) * 0.006 );
 	
 	
 	lightPos[0] = vec3(uLightMatrix[0][0][0], uLightMatrix[0][0][1], uLightMatrix[0][0][2]);
@@ -808,16 +810,19 @@ void main( void )
 	vec3 finalColor = sqrt( pixelColor ); 
 	//finalColor = pow( pixelColor, vec3( 1.0 / screenGamma ) );
 		
-    	//gl_FragColor = mix( texture2D(tPreviousTexture, vUv), vec4(finalColor, 1.0), 0.05 );
+    	finalColor = mix( finalColor, texture2D(tPreviousTexture, vUv).rgb, min(uFrameCounter,0.95) );
+	
+	// Slowest Converging, Max Motion Blur if animated
+	//finalColor = ( texture2D(tPreviousTexture, vUv).rgb * clamp(uFrameCounter, 0.0, 0.92) ) + ( finalColor * max(1.0-uFrameCounter, 0.1) );
 	
 	// Slow Converging, Motion Blur if animated
-	//finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.91) + finalColor * 0.1;
+	//finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.91) + (finalColor * 0.1);
 	
 	// Fast Converging, slight Motion Blur
-	finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.8) + finalColor * 0.2;
+	//finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.8) + (finalColor * 0.2);
 	
 	// Fastest Converging, almost no Motion Blur
-	//finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.5) + finalColor * 0.5;
+	//finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.5) + (finalColor * 0.5);
 	
 	gl_FragColor = vec4(finalColor,1.0);
 }
@@ -844,13 +849,15 @@ void main( void )
 			var fovScale;
 			var frameTime, elapsedTime;
 			var rttUniforms;
-			var pixelRatio = 0.3;
+			var pixelRatio = 0.5;
 			var TWO_PI = Math.PI * 2;
 			var rotationalAmount = 2.0;
 			var rotationalAxis = new THREE.Vector3(0,1,0);
 			var cameraDirectionVec = new THREE.Vector3();
 			var swap = false;
 			var clearScreenFlag = false;
+			var frameCounter = 0.1;
+			
 			
 			init();
 			animate();
@@ -919,6 +926,7 @@ void main( void )
 					resolution: { type: "v2", value: new THREE.Vector2() },
 					
 					time: { type: "f", value: 0.0 },
+					uFrameCounter: { type: "f", value: 0.1 },
 					uULen: { type: "f", value: 1.0 },
 					uVLen: { type: "f", value: 1.0 },
 					
@@ -1163,19 +1171,24 @@ void main( void )
 
 				requestAnimationFrame( animate );
 
-				//frameTime = clock.getDelta();
+				frameTime = clock.getDelta();
 				elapsedTime = clock.getElapsedTime() % 1000;
+				
+				frameCounter += 0.01;
 				
 				rttUniforms.time.value = elapsedTime;
 				
-				/*
+				rttUniforms.uFrameCounter.value = frameCounter;
+				
+				
 				// just testing progressiveness of PathTracing
-				if (elapsedTime % 6.0 < 0.05) {
+				if (frameCounter > 4.0) {
 					stopTime += 2.0;
 					clearScreenFlag = true;
+					frameCounter = 0.1;
 				}
 				elapsedTime = stopTime;
-				*/		
+						
 			
 				// LIGHTS
 				pointLight00.position.set( Math.sin(elapsedTime * 0.2)*10.0, 4.0, -5.0);
