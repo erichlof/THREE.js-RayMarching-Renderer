@@ -615,6 +615,7 @@ vec3 getPixelColor( vec2 camUV, vec3 camPos, vec3 rayDir )
 	float opacity = 0.0;
 	float refractionRatio = 0.0;
 	float distFromCamera = 0.0;
+	float reflectedDistFromCamera = 0.0;
 	
 	// initial raymarching (raycast)
 	float delta00 = 0.1;
@@ -673,8 +674,17 @@ vec3 getPixelColor( vec2 camUV, vec3 camPos, vec3 rayDir )
 		if ( res01.x < EPSILON ) break;
         	delta01 += res01.x;
     	}
+	
 			
 	reflectedPos = pos + reflectedDir * delta01;
+	
+	// first check if the ray didn't hit anything
+	reflectedDistFromCamera = length( reflectedPos - pos );
+	
+	if ( reflectedDistFromCamera > MAX_RENDER_DISTANCE )
+	{
+		res01.y = -5.0;
+	}
 	
 	// check if we hit a light source
 	if ( res01.y == -1.0 ) reflectedColor += ( light00Color / uLightMatrix[0][0][3] );
@@ -736,6 +746,14 @@ vec3 getPixelColor( vec2 camUV, vec3 camPos, vec3 rayDir )
     		}
 			
 		refractedPos = refractedPos + refractedDir * delta03;
+		
+		// first check if the ray didn't hit anything
+		reflectedDistFromCamera = length( refractedPos - pos );
+	
+		if ( reflectedDistFromCamera > MAX_RENDER_DISTANCE )
+		{
+			res03.y = -5.0;
+		}
 		
 		// check if we hit a light source
 		if ( res03.y == -1.0 ) refractedColor += ( light00Color / uLightMatrix[0][0][3] );
