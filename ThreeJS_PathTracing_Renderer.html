@@ -17,6 +17,20 @@
 				margin: 0px;
 				overflow: hidden;
 			}
+			
+			#instructions {
+			
+				font-family: arial;
+				font-weight: bold;
+				width: 100%;
+				height: 100%;
+				position: fixed;
+				top: 35%;
+				color: #ffffff;
+				text-align: center;
+				cursor: pointer;
+			
+			}
 
 			#info {
 				position: absolute;
@@ -36,15 +50,18 @@
 
 		<div id="container"></div>
 		<div id="info"> three.js PathTracing Renderer</div>
+		
+		<div id="instructions">
+		<span style="font-size:40px"></span>
+		</div>
 
-		<!-- for Debugging -->
-		<!-- <script src="js/three-r74.js"></script> -->
-		
-		<!-- for Release -->
-		<script src="js/three-r75.min.js"></script>
-		
-		<script src="js/Detector.js"></script>
-		<script src="js/stats.min.js"></script>
+		<script src="js/three-r75.min.js"> </script>
+		<script src="js/threex.keyboardstate.js"> </script>
+		<script src="js/FirstPersonCameraControls.js"> </script>
+		<script src="js/virtualButtonJoystick.js"> </script>
+
+		<script src="js/Detector.js"> </script>
+		<script src="js/stats.min.js"> </script>
 		
 		
 		<script id="screenVertexShader" type="x-shader/x-vertex">
@@ -65,9 +82,44 @@ void main() {
 precision highp float;
 varying vec2 vUv;
 uniform sampler2D tTexture0;
+uniform float uSampleCounter;
 
 void main() {
 
+	vec3 pixelColor = texture2D(tTexture0, vUv).rgb;// / (uSampleCounter + 1.0);
+	
+	pixelColor = sqrt(pixelColor);
+	
+	gl_FragColor = vec4(pixelColor, 1.0);
+	
+	//gl_FragColor = texture2D(tTexture0, vUv);
+	
+}
+		
+		</script>
+		
+		<script id="screenTextureVertexShader" type="x-shader/x-vertex">
+
+varying vec2 vUv;
+
+void main() {
+
+	vUv = uv;
+	gl_Position = vec4( position, 1.0 );
+
+}
+
+		</script>
+		
+		<script id="screenTextureFragmentShader" type="x-shader/x-fragment">
+		
+precision highp float;
+varying vec2 vUv;
+uniform sampler2D tTexture0;
+uniform float uSampleCounter;
+
+void main() {
+	
 	gl_FragColor = texture2D(tTexture0, vUv);
 	
 }
@@ -92,7 +144,7 @@ precision highp float;
 
 uniform vec2 resolution;
 uniform float time;
-uniform float uFrameCounter;
+uniform float uSampleCounter;
 uniform float uULen;
 uniform float uVLen;
 
@@ -107,7 +159,10 @@ uniform mat4 uCameraMatrix;
 uniform mat4 uLightMatrix[3];
 uniform mat4 uSphereMeshMatrix[4];
 
+uniform vec3 uRandomVector;
+
 uniform sampler2D tPreviousTexture;
+
 varying vec2 vUv;
 
 
@@ -804,7 +859,8 @@ void main( void )
 	
     	vec3 rayDir = normalize(camUV.x * camRight * uULen + camUV.y * camUp * uVLen + camForward);
 	// jittering
-	rayDir += ( vec3( hash11(sin(time+screenPos.x)), hash11(cos(time+screenPos.y)), hash11(cos(time+screenPos.x * screenPos.y)) ) * 0.003 );
+	
+	rayDir += vec3( hash11(uRandomVector.x) * 2.0 - 1.0, hash11(uRandomVector.y) * 2.0 - 1.0, hash11(uRandomVector.z) * 2.0 - 1.0 ) * min(0.002, uSampleCounter * 0.0005);
 	//camPos += ( vec3( hash11(sin(time)), hash11(cos(time)), hash11(sin(time)) ) * 0.01 );
 	//camPos += ( vec3( 0.0, hash11(cos(time)), hash11(sin(time)) ) * 0.006 );
 	
@@ -820,27 +876,42 @@ void main( void )
 	
 	// perform path tracing (via RayMarching) and get resulting pixel color
 	vec3 pixelColor = getPixelColor(camUV, camPos, rayDir);
+	vec3 finalColor = vec3(0.0);
+	
+	// Progressive rendering
+	if (uSampleCounter >= 1.0) 
+	{
+		//finalColor = pixelColor;
+		//finalColor = pixelColor / uSampleCounter;
+		//finalColor = ( texture2D(tPreviousTexture, vUv).rgb + pixelColor ) / uSampleCounter;
+		finalColor = texture2D(tPreviousTexture, vUv).rgb + (pixelColor / uSampleCounter);
+	}
+	else if (uSampleCounter < 0.0)
+	{
+		finalColor = pixelColor;
+	}
+	else 
+	{
+		finalColor = vec3(0.0);
+	}
+	
+	
+	// Slow Converging, Motion Blur if animated
+	//pixelColor = (texture2D(tPreviousTexture, vUv).rgb * min(0.99, 1.0 - (1.0 / uSampleCounter)) ) + 
+	//		( pixelColor * max(0.01,1.0 / uSampleCounter) );
+	
+	// Fast Converging, slight Motion Blur
+	//pixelColor = (texture2D(tPreviousTexture, vUv).rgb * 0.8) + (pixelColor * 0.2);
+	
+	// Fastest Converging, almost no Motion Blur
+	//pixelColor = (texture2D(tPreviousTexture, vUv).rgb * 0.5) + (pixelColor * 0.5);
 	
 	
 	// post processing
 	
 	// Gamma correction
-	vec3 finalColor = sqrt( pixelColor ); 
-	//finalColor = pow( pixelColor, vec3( 1.0 / screenGamma ) );
-		
-    	finalColor = mix( finalColor, texture2D(tPreviousTexture, vUv).rgb, min(uFrameCounter, 0.98) );
-	
-	// Slowest Converging, Max Motion Blur if animated
-	//finalColor = ( texture2D(tPreviousTexture, vUv).rgb * clamp(uFrameCounter, 0.0, 0.92) ) + ( finalColor * max(1.0-uFrameCounter, 0.1) );
-	
-	// Slow Converging, Motion Blur if animated
-	//finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.91) + (finalColor * 0.1);
-	
-	// Fast Converging, slight Motion Blur
-	//finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.8) + (finalColor * 0.2);
-	
-	// Fastest Converging, almost no Motion Blur
-	//finalColor = (texture2D(tPreviousTexture, vUv).rgb * 0.5) + (finalColor * 0.5);
+	//finalColor = sqrt( finalColor ); 
+	//finalColor = pow( finalColor, vec3( 1.0 / screenGamma ) );
 	
 	gl_FragColor = vec4(finalColor,1.0);
 }
@@ -852,9 +923,13 @@ void main( void )
 
 			if ( ! Detector.webgl ) Detector.addGetWebGLMessage();
 
+			var SCREEN_WIDTH = window.innerWidth;
+			var SCREEN_HEIGHT = window.innerHeight;
 			var container, stats;
+			var controls;
 			var rttGeometry, rttMaterial, rttMesh; // rtt = render to texture
 			var screenGeometry, screenMaterial, screenMesh;
+			var screenTextureGeometry, screenTextureMaterial, screenTextureMesh;
 			var groundGeometry, checkeredMaterial, groundMesh;
 			var boxGeometry, blueMaterial, boxMesh;
 			var sphereGeometry, mirrorMaterial, whiteMaterial, glassMaterial;
@@ -862,19 +937,117 @@ void main( void )
 			var pointLight00, pointLight01, pointLight02;
 			var quadCamera, rttCamera;
 			var renderer, clock;
-			var rttPathTraceTexture, rttScreenOutputTexture, sceneScreen, sceneRTT; // RTT = Render To Texture
+			var rttPathTraceTexture, rttScreenOutputTexture;
+			var sceneScreen, sceneTextureScreen, sceneRTT; // RTT = Render To Texture
 			var windowWidth, windowHeight;
 			var fovScale;
 			var frameTime, elapsedTime;
-			var rttUniforms;
-			var pixelRatio = 0.5;
+			var rttUniforms, screenUniforms, screenTextureUniforms;
+			var pixelRatio = 0.2;
 			var TWO_PI = Math.PI * 2;
 			var rotationalAmount = 2.0;
 			var rotationalAxis = new THREE.Vector3(0,1,0);
-			var cameraDirectionVec = new THREE.Vector3();
+			var randomVector = new THREE.Vector3();
 			var swap = false;
 			var clearScreenFlag = false;
-			var frameCounter = 0.5;
+			var sampleCounter = 0.0;
+			var stopTime = 10.0;
+			var keyboard = new THREEx.KeyboardState();
+			var isPaused = true;
+			var cameraHasMoved = false;
+			var oldYawRotation, oldPitchRotation;
+			var fontAspect;
+
+			// are we in portrait mobile view? if so, move the buttons over to the left a little..
+			// if not and we are in landscape mode, they can safely be moved farther right without running into each other
+			var b2PercentLeft = SCREEN_WIDTH < SCREEN_HEIGHT ? 50 : 65;
+			var b1PercentLeft = SCREEN_WIDTH < SCREEN_HEIGHT ? 77 : 81;
+			var b3PercentLeft = Math.floor( (b1PercentLeft + b2PercentLeft) / 2 );
+			var joystick = new VirtualJoystick({
+				add3Buttons: true,
+				hideJoystick: true,
+				hideButtons: false,
+				button1PercentLeft: b1PercentLeft,
+				button2PercentLeft: b2PercentLeft,
+				button3PercentLeft: b3PercentLeft
+			});
+
+			var PI_2 = Math.PI / 2;//used by controls below
+			
+			var instructionsElement = document.getElementById( 'instructions' );
+			
+			var mouseControl = false;
+			// if not on a mobile device, enable mouse control 
+			if ( !('createTouch' in document) ) {
+				mouseControl = true;
+			}
+			
+			// if on mobile device, unpause the app because there is no ESC key and no mouse capture to do
+			if ( !mouseControl )
+				isPaused = false;
+			
+			if (mouseControl) {
+	
+				instructionsElement.innerHTML = 'Paused <br> Click to start';
+
+				document.body.addEventListener("click", function() {
+					this.requestPointerLock = this.requestPointerLock || this.mozRequestPointerLock;
+					this.requestPointerLock();
+				}, false);
+
+
+				window.addEventListener("mousedown", function(event) {
+					if ( !isPaused ) {
+						if(event.button === 0) {
+							
+						}	
+						else if(event.button === 2) {
+							
+						}
+					}	
+				}, false);
+
+				window.addEventListener("click", function(event) {
+					event.preventDefault();	
+				}, false);
+				window.addEventListener("dblclick", function(event) {
+					event.preventDefault();	
+				}, false);
+
+
+				var pointerlockChange = function ( event ) {
+
+					if ( document.pointerLockElement === instructionsElement || document.mozPointerLockElement === instructionsElement || document.webkitPointerLockElement === instructionsElement ||
+						document.pointerLockElement === document.body || document.mozPointerLockElement === document.body || document.webkitPointerLockElement === document.body ) {
+
+						instructionsElement.style.display = 'none';
+						isPaused = false;
+
+					} else {
+
+						instructionsElement.style.display = '';
+						isPaused = true;
+
+					}
+
+				};
+
+				// Hook pointer lock state change events
+				document.addEventListener( 'pointerlockchange', pointerlockChange, false );
+				document.addEventListener( 'mozpointerlockchange', pointerlockChange, false );
+				document.addEventListener( 'webkitpointerlockchange', pointerlockChange, false );
+
+			}
+
+			// the following variables will be used to calculate rotations and directions from the camera
+			var cameraDirectionVector = new THREE.Vector3();//for moving where the camera is looking
+			var cameraRightVector = new THREE.Vector3();//for strafing the camera right and left
+			var cameraUpVector = new THREE.Vector3();//for moving camera up and down
+			var cameraWorldQuaternion = new THREE.Quaternion();//for rotating scene objects to match camera's current rotation
+			var cameraControlsObject;//for positioning and moving the camera itself
+			var cameraControlsYawObject;//allows access to control camera's left/right movements through mobile input
+			var cameraControlsPitchObject;//allows access to control camera's up/down movements through mobile input
+
 			
 			
 			init();
@@ -894,8 +1067,6 @@ void main( void )
 				stats.domElement.style.position = 'absolute';
 				stats.domElement.style.top = '0px';
 				container.appendChild( stats.domElement );
-
-				
 				
 				window.addEventListener( 'resize', onWindowResize, false );
 				
@@ -903,6 +1074,36 @@ void main( void )
 				
 				sceneRTT = new THREE.Scene();
 				sceneScreen = new THREE.Scene();
+				sceneTextureScreen = new THREE.Scene();
+				
+				// quadCamera is simply the camera to help render the full screen quad (2 triangles),
+				// hence the name.  It is an Orthographic camera that sits facing the view plane, which serves as
+				// the window into our 3d world. This camera will not move or rotate for the duration of the app.
+				quadCamera = new THREE.OrthographicCamera( -1, 1, 1, -1, 0, 1 );
+				sceneScreen.add(quadCamera);
+				sceneTextureScreen.add(quadCamera);
+				
+				// rttCamera is the dynamic camera 3d object that will be positioned, oriented and 
+				// constantly updated inside the 3d scene.  Its view will ultimately get passed back to the 
+				// stationary quadCamera, which renders the scene to a fullscreen quad (made up of 2 large triangles).
+				rttCamera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 1000);
+				sceneRTT.add(rttCamera);
+				
+				controls = new FirstPersonCameraControls( rttCamera );
+							
+				cameraControlsObject = controls.getObject();
+				cameraControlsYawObject = controls.getYawObject();
+				cameraControlsPitchObject = controls.getPitchObject();
+				
+				sceneRTT.add( cameraControlsObject );
+
+				// for debug flyCam
+				cameraControlsObject.position.set(-5,5,10);
+				cameraControlsYawObject.rotation.y = 0.0;
+				// look slightly downward
+				cameraControlsPitchObject.rotation.x = -0.4;
+				joystick.previousRotationX = -0.4;
+				
 				
 				rttPathTraceTexture = new THREE.WebGLRenderTarget( window.innerWidth * pixelRatio, window.innerHeight * pixelRatio, {
 					minFilter: THREE.NearestFilter, // default THREE.LinearMipMapLinearFilter
@@ -923,30 +1124,60 @@ void main( void )
 				rttPathTraceTexture.texture.generateMipmaps = false;
 				rttScreenOutputTexture.texture.generateMipmaps = false;
 				
-				// quadCamera is simply the camera to help render the full screen quad (2 triangles),
-				// hence the name.  It is an Orthographic camera that sits facing the view plane, which serves as
-				// the window into our 3d world. This camera will not move or rotate for the duration of the app.
-				quadCamera = new THREE.OrthographicCamera( -1, 1, 1, -1, 0, 1 );
-				sceneScreen.add(quadCamera);
 				
-				// rttCamera is the dynamic camera 3d object that will be positioned, oriented and 
-				// constantly updated inside the 3d scene.  Its view will ultimately get passed back to the 
-				// stationary quadCamera, which renders the scene to a fullscreen quad (made up of 2 large triangles).
-				rttCamera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 1000);
-				sceneRTT.add(rttCamera);
-				//rttCamera.position.set(0,1,5);
-				//rttCamera.lookAt(new THREE.Vector3(0,0,-1));
+				screenGeometry = new THREE.PlaneBufferGeometry( 2, 2 );
+				
+				screenUniforms = {
+					tTexture0: { type: "t", value: rttScreenOutputTexture },
+					uSampleCounter: { type: "f", value: 0.0 }
+				}
+				
+				screenMaterial = new THREE.ShaderMaterial( {
+					uniforms: screenUniforms,
+					vertexShader: document.getElementById( 'screenVertexShader' ).textContent,
+					fragmentShader: document.getElementById( 'screenFragmentShader' ).textContent,
+					depthWrite: false,
+					depthTest: false
+				} );
+				
+				screenMesh = new THREE.Mesh(screenGeometry, screenMaterial);
+				sceneScreen.add(screenMesh);
+				
+				
+				
+				screenTextureGeometry = new THREE.PlaneBufferGeometry( 2, 2 );
+				
+				screenTextureUniforms = {
+					tTexture0: { type: "t", value: rttPathTraceTexture },
+					uSampleCounter: { type: "f", value: 0.0 }
+				}
+				
+				screenTextureMaterial = new THREE.ShaderMaterial( {
+					uniforms: screenTextureUniforms,
+					vertexShader: document.getElementById( 'screenTextureVertexShader' ).textContent,
+					fragmentShader: document.getElementById( 'screenTextureFragmentShader' ).textContent,
+					depthWrite: false,
+					depthTest: false
+				} );
+				
+				screenTextureMesh = new THREE.Mesh(screenTextureGeometry, screenTextureMaterial);
+				sceneTextureScreen.add(screenTextureMesh);
+				
+				
 				
 				rttGeometry = new THREE.PlaneBufferGeometry( 2, 2 );
 
 				rttUniforms = {
 					tPreviousTexture: { type: "t", value: rttScreenOutputTexture },
-					resolution: { type: "v2", value: new THREE.Vector2() },
 					
 					time: { type: "f", value: 0.0 },
-					uFrameCounter: { type: "f", value: 0.0 },
+					uSampleCounter: { type: "f", value: 0.0 },
 					uULen: { type: "f", value: 1.0 },
 					uVLen: { type: "f", value: 1.0 },
+					
+					resolution: { type: "v2", value: new THREE.Vector2() },
+					
+					uRandomVector: { type: "v3", value: new THREE.Vector3() },
 					
 					uCheckeredMaterialMatrix: { type: "m3", value: new THREE.Matrix3() },
 					uMirrorMaterialMatrix: { type: "m3", value: new THREE.Matrix3() },
@@ -971,6 +1202,14 @@ void main( void )
 
 				rttMesh = new THREE.Mesh( rttGeometry, rttMaterial );
 				sceneRTT.add( rttMesh );
+				
+				// the following keeps the large scene ShaderMaterial quad right in front 
+				//   of the camera at all times. This is necessary because without it, the scene 
+				//   quad will fall out of view and get clipped when the camera rotates past 180 degrees.
+				rttCamera.add( rttMesh );
+				
+				
+				
 
 				
 				// Ground
@@ -1136,20 +1375,8 @@ void main( void )
 				rttUniforms.uLightMatrix.value[2].elements[8] = pointLight02.distance;
 				
 				
-				screenGeometry = new THREE.PlaneBufferGeometry( 2, 2 );
 				
-				screenMaterial = new THREE.ShaderMaterial( {
-					uniforms: { tTexture0: { type: "t", value: rttPathTraceTexture },
-						    //tTexture1: { type: "t", value: rttScreenOutputTexture }
-						  },
-					vertexShader: document.getElementById( 'screenVertexShader' ).textContent,
-					fragmentShader: document.getElementById( 'screenFragmentShader' ).textContent,
-					depthWrite: false,
-					depthTest: false
-				} );
 				
-				screenMesh = new THREE.Mesh(screenGeometry, screenMaterial);
-				sceneScreen.add(screenMesh);
 				
 				// this must be at the end of the init() function
 				onWindowResize();
@@ -1160,6 +1387,18 @@ void main( void )
 			
 
 			function onWindowResize( event ) {
+				
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				
+				SCREEN_WIDTH = window.innerWidth;
+				SCREEN_HEIGHT = window.innerHeight;
+				
+				fontAspect = (SCREEN_WIDTH / 175) * (SCREEN_HEIGHT / 200);
+				if (fontAspect > 25) fontAspect = 25;
+				if (fontAspect < 4) fontAspect = 4;
+				fontAspect *= 2;
+				instructionsElement.style.fontSize = fontAspect + "px";
+	
 
 				rttUniforms.resolution.value.x = window.innerWidth * pixelRatio;
 				rttUniforms.resolution.value.y = window.innerHeight * pixelRatio;
@@ -1176,14 +1415,24 @@ void main( void )
 				fovScale = rttCamera.fov * 0.5 * (Math.PI / 180.0);
 				rttUniforms.uVLen.value = Math.tan(fovScale);
 				rttUniforms.uULen.value = rttUniforms.uVLen.value * rttCamera.aspect;
-
-				renderer.setSize( window.innerWidth, window.innerHeight );
+				
+				// check if mobile device is in portrait or landscape mode and position buttons accordingly
+				b2PercentLeft = SCREEN_WIDTH < SCREEN_HEIGHT ? 50 : 65;
+				joystick._button2El.style.left = b2PercentLeft + "%";
+				b1PercentLeft = SCREEN_WIDTH < SCREEN_HEIGHT ? 77 : 81;
+				joystick._button1El.style.left = b1PercentLeft + "%";
+				joystick._button3El.style.left = Math.floor( (b1PercentLeft + b2PercentLeft) / 2 ) + "%";
+				if (SCREEN_WIDTH < SCREEN_HEIGHT ) {
+					joystick._button3El.style.bottom = 11 + "%";
+				}
+				else if (SCREEN_WIDTH > SCREEN_HEIGHT ) {
+					joystick._button3El.style.bottom = 21 + "%";
+				}
 				
 				
 			}
 			
 
-			var stopTime = 10.0;
 
 			function animate() {
 
@@ -1192,20 +1441,103 @@ void main( void )
 				frameTime = clock.getDelta();
 				elapsedTime = clock.getElapsedTime() % 1000;
 				
-				frameCounter += 0.01;
+				pixelRatio = 1.0;
+				
+				//if (pixelRatio > 1.0)
+				//	pixelRatio = 1.0;
+                       		
+				
 				
 				rttUniforms.time.value = elapsedTime;
 				
-				rttUniforms.uFrameCounter.value = frameCounter;
 				
-				
+
 				// just testing progressiveness of PathTracing
-				if (frameCounter > 4.0) {
+				if (sampleCounter > 150.0) {
 					stopTime += 2.0;
-					clearScreenFlag = true;
-					frameCounter = 0.5;
+					//clearScreenFlag = true;
+					sampleCounter = 0.0;
+					pixelRatio = 0.2;
 				}
 				elapsedTime = stopTime;
+				
+				// check user controls
+				
+				if (oldYawRotation != cameraControlsYawObject.rotation.y){
+					sampleCounter = -1.0;
+					pixelRatio = 0.2;
+				}
+				if (oldPitchRotation != cameraControlsPitchObject.rotation.x) {
+					sampleCounter = -1.0;
+					pixelRatio = 0.2;
+				}
+				// save state for next frame
+				oldYawRotation = cameraControlsYawObject.rotation.y;
+				oldPitchRotation = cameraControlsPitchObject.rotation.x;
+			
+				// if not playing on desktop, get the rotation from the mobile-touch virtual Joystick
+				if (!mouseControl) {
+
+					cameraControlsYawObject.rotation.y = joystick.previousRotationY - joystick.deltaX() * 0.005;
+					cameraControlsPitchObject.rotation.x = joystick.previousRotationX - joystick.deltaY() * 0.005;
+					// clamp the camera's vertical movement (around the x-axis) to the 'ceiling' and 'floor',
+					// so you can't accidentally flip the camera upside down
+					cameraControlsPitchObject.rotation.x = Math.max( - PI_2, Math.min( PI_2, cameraControlsPitchObject.rotation.x ) );
+
+					if (joystick.deltaX() || joystick.deltaY()){
+						sampleCounter = -1.0;
+						pixelRatio = 0.2;
+					}
+				}
+				
+				// this gives us a vector in the direction that the camera is pointing,
+				// which will be useful for moving the camera 'forward' and shooting projectiles in that direction
+				controls.getDirection(cameraDirectionVector);
+				//cameraDirectionVector.normalize();
+				controls.getUpVector(cameraUpVector);
+				controls.getRightVector(cameraRightVector);
+
+				// the following gives us a rotation quaternion (4D vector), which will be useful for 
+				// rotating scene objects to match the camera's rotation
+				rttCamera.getWorldQuaternion(cameraWorldQuaternion);
+				
+				// allow flying camera
+				if ( joystick.button3Pressed || keyboard.pressed('W') ) {
+
+					cameraControlsObject.position.add(cameraDirectionVector.multiplyScalar(5 * frameTime));
+					sampleCounter = -1.0;
+					pixelRatio = 0.2;
+				}
+				if ( keyboard.pressed('S') ) {
+
+					cameraControlsObject.position.sub(cameraDirectionVector.multiplyScalar(5 * frameTime));
+					sampleCounter = -1.0;
+					pixelRatio = 0.2;
+				}
+				if ( joystick.button1Pressed || keyboard.pressed('D') ) {
+
+					cameraControlsObject.position.add(cameraRightVector.multiplyScalar(5 * frameTime));
+					sampleCounter = -1.0;
+					pixelRatio = 0.2;
+				}
+				if ( keyboard.pressed('A') ) {
+
+					cameraControlsObject.position.sub(cameraRightVector.multiplyScalar(5 * frameTime));
+					sampleCounter = -1.0;
+					pixelRatio = 0.2;
+				}
+				if ( joystick.button2Pressed || keyboard.pressed('Q') ) {
+
+					cameraControlsObject.position.add(cameraUpVector.multiplyScalar(5 * frameTime));
+					sampleCounter = -1.0;
+					pixelRatio = 0.2;
+				}
+				if ( keyboard.pressed('Z') ) {
+
+					cameraControlsObject.position.sub(cameraUpVector.multiplyScalar(5 * frameTime));
+					sampleCounter = -1.0;
+					pixelRatio = 0.2;
+				}
 						
 			
 				// LIGHTS
@@ -1251,40 +1583,51 @@ void main( void )
 				
 
 				// CAMERA
-				rttCamera.position.set( (Math.sin(elapsedTime * 0.25)) * 8, 3 + (2.5 * Math.sin(elapsedTime * 0.2)), 1 );
-				//rttCamera.position.set( 0, 0, (Math.sin(elapsedTime)) * 10.0 + 10.0 );
-				//rttCamera.position.set( (Math.sin(elapsedTime * 0.2)) * 10.0, 4, (Math.cos(elapsedTime * 0.2)) * 10.0 );
+				///cameraControlsObject.position.set( (Math.sin(elapsedTime * 0.25)) * 8, 3 + (2.5 * Math.sin(elapsedTime * 0.2)), 1 );
 				
 				if (clearScreenFlag) {
-					rttCamera.position.set(10000,10000,10000);
+					///cameraControlsObject.position.set(10000,10000,10000);
 					clearScreenFlag = false;
 				}
-				//rttCamera.lookAt(boxMesh.position);
-				rttCamera.lookAt(sceneRTT.position);
-				//rttCamera.updateMatrixWorld(true);
 				
-				rttUniforms.uCameraMatrix.value.copy(rttCamera.matrixWorld);
+				rttUniforms.uCameraMatrix.value.copy( rttCamera.matrixWorld );
 				
-                       		
+				
+				rttUniforms.uRandomVector.value = randomVector.set( Math.random() * 2.0 - 1.0, Math.random() * 2.0 - 1.0, Math.random() * 2.0 - 1.0 );
+				rttUniforms.uSampleCounter.value = sampleCounter;
+				screenUniforms.uSampleCounter.value = sampleCounter;
+				screenTextureUniforms.uSampleCounter.value = sampleCounter;
+				
+				rttUniforms.resolution.value.x = SCREEN_WIDTH * pixelRatio;
+				rttUniforms.resolution.value.y = SCREEN_HEIGHT * pixelRatio;
+				
+				renderer.setPixelRatio(pixelRatio);
 				// RENDERING in 3 steps
 				
 				// STEP 1
 				// Perform PathTracing and Render into rttPathTraceTexture
 				// Read previous rttScreenOutputTexture to use as a new starting point to blend with
+				rttPathTraceTexture.setSize( SCREEN_WIDTH * pixelRatio, SCREEN_HEIGHT * pixelRatio );
 				renderer.render( sceneRTT, rttCamera, rttPathTraceTexture );
 				
 				// STEP 2
-				// Render full screen quad with generated texture
-				// This will be shown on the screen as the final scene output
-				renderer.render( sceneScreen, quadCamera );
+				
 				
 				// STEP 3
 				// Also render(save) the final scene output into rttScreenOutputTexture
 				// This will be used as a new starting point for Step 1 above
-				renderer.render( sceneScreen, quadCamera, rttScreenOutputTexture );
+				rttScreenOutputTexture.setSize( SCREEN_WIDTH * pixelRatio, SCREEN_HEIGHT * pixelRatio );
+				renderer.render( sceneTextureScreen, quadCamera, rttScreenOutputTexture );
+				
+				// Render full screen quad with generated rttScreenOutputTexture above
+				// This will be shown on the screen as the final scene output
+				renderer.render( sceneScreen, quadCamera );
 				
 				
 				stats.update();
+				
+				
+				sampleCounter += 1.0;		
 
 			}
 
