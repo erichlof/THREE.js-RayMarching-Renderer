@@ -86,13 +86,13 @@ uniform float uSampleCounter;
 
 void main() {
 
-	vec3 pixelColor = texture2D(tTexture0, vUv).rgb;// / (uSampleCounter + 1.0);
+	vec3 pixelColor = vec3(0.0);
+	
+	pixelColor = texture2D(tTexture0, vUv).rgb;
 	
 	pixelColor = sqrt(pixelColor);
 	
 	gl_FragColor = vec4(pixelColor, 1.0);
-	
-	//gl_FragColor = texture2D(tTexture0, vUv);
 	
 }
 		
@@ -120,7 +120,13 @@ uniform float uSampleCounter;
 
 void main() {
 	
-	gl_FragColor = texture2D(tTexture0, vUv);
+	vec3 pixelColor = vec3(0.0);
+	
+	pixelColor = texture2D(tTexture0, vUv).rgb;
+	
+	//pixelColor = sqrt(pixelColor);
+	
+	gl_FragColor = vec4(pixelColor, 1.0);
 	
 }
 		
@@ -858,9 +864,8 @@ void main( void )
 	vec3 camForward = ( vec3(-uCameraMatrix[2][0], -uCameraMatrix[2][1], -uCameraMatrix[2][2]) );
 	
     	vec3 rayDir = normalize(camUV.x * camRight * uULen + camUV.y * camUp * uVLen + camForward);
-	// jittering
-	
-	rayDir += vec3( hash11(uRandomVector.x) * 2.0 - 1.0, hash11(uRandomVector.y) * 2.0 - 1.0, hash11(uRandomVector.z) * 2.0 - 1.0 ) * min(0.002, uSampleCounter * 0.0005);
+	// jittering	
+	rayDir += vec3( hash11(uRandomVector.x + camUV.x) * 2.0 - 1.0, hash11(uRandomVector.y + camUV.y) * 2.0 - 1.0, hash11(uRandomVector.z + camUV.x) * 2.0 - 1.0 ) * min(0.002, uSampleCounter * 0.0005);
 	//camPos += ( vec3( hash11(sin(time)), hash11(cos(time)), hash11(sin(time)) ) * 0.01 );
 	//camPos += ( vec3( 0.0, hash11(cos(time)), hash11(sin(time)) ) * 0.006 );
 	
@@ -879,21 +884,10 @@ void main( void )
 	vec3 finalColor = vec3(0.0);
 	
 	// Progressive rendering
-	if (uSampleCounter >= 1.0) 
-	{
-		//finalColor = pixelColor;
-		//finalColor = pixelColor / uSampleCounter;
-		//finalColor = ( texture2D(tPreviousTexture, vUv).rgb + pixelColor ) / uSampleCounter;
-		finalColor = texture2D(tPreviousTexture, vUv).rgb + (pixelColor / uSampleCounter);
-	}
-	else if (uSampleCounter < 0.0)
-	{
+	if (uSampleCounter < 0.0)
 		finalColor = pixelColor;
-	}
-	else 
-	{
-		finalColor = vec3(0.0);
-	}
+	else
+		finalColor = mix(pixelColor, texture2D(tPreviousTexture, vUv).rgb, uSampleCounter / (uSampleCounter + 1.0) );
 	
 	
 	// Slow Converging, Motion Blur if animated
@@ -950,7 +944,7 @@ void main( void )
 			var randomVector = new THREE.Vector3();
 			var swap = false;
 			var clearScreenFlag = false;
-			var sampleCounter = 0.0;
+			var sampleCounter = -1.0;
 			var stopTime = 10.0;
 			var keyboard = new THREEx.KeyboardState();
 			var isPaused = true;
@@ -1171,7 +1165,7 @@ void main( void )
 					tPreviousTexture: { type: "t", value: rttScreenOutputTexture },
 					
 					time: { type: "f", value: 0.0 },
-					uSampleCounter: { type: "f", value: 0.0 },
+					uSampleCounter: { type: "f", value: -1.0 },
 					uULen: { type: "f", value: 1.0 },
 					uVLen: { type: "f", value: 1.0 },
 					
@@ -1443,20 +1437,14 @@ void main( void )
 				
 				pixelRatio = 1.0;
 				
-				//if (pixelRatio > 1.0)
-				//	pixelRatio = 1.0;
-                       		
-				
-				
 				rttUniforms.time.value = elapsedTime;
 				
 				
-
 				// just testing progressiveness of PathTracing
 				if (sampleCounter > 150.0) {
 					stopTime += 2.0;
 					//clearScreenFlag = true;
-					sampleCounter = 0.0;
+					sampleCounter = -1.0;
 					pixelRatio = 0.2;
 				}
 				elapsedTime = stopTime;
@@ -1602,6 +1590,7 @@ void main( void )
 				rttUniforms.resolution.value.y = SCREEN_HEIGHT * pixelRatio;
 				
 				renderer.setPixelRatio(pixelRatio);
+				
 				// RENDERING in 3 steps
 				
 				// STEP 1
@@ -1611,19 +1600,17 @@ void main( void )
 				renderer.render( sceneRTT, rttCamera, rttPathTraceTexture );
 				
 				// STEP 2
-				
-				
-				// STEP 3
-				// Also render(save) the final scene output into rttScreenOutputTexture
+				// render(save) the final scene output into rttScreenOutputTexture
 				// This will be used as a new starting point for Step 1 above
 				rttScreenOutputTexture.setSize( SCREEN_WIDTH * pixelRatio, SCREEN_HEIGHT * pixelRatio );
 				renderer.render( sceneTextureScreen, quadCamera, rttScreenOutputTexture );
 				
+				// STEP 3
 				// Render full screen quad with generated rttScreenOutputTexture above
 				// This will be shown on the screen as the final scene output
 				renderer.render( sceneScreen, quadCamera );
 				
-				
+								
 				stats.update();
 				
 				
