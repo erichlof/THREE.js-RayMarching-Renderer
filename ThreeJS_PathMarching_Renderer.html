@@ -49,7 +49,7 @@
 	<body>
 
 		<div id="container"></div>
-		<div id="info"> three.js PathTracing Renderer</div>
+		<div id="info"> three.js PathMarching Renderer</div>
 		
 		<div id="instructions">
 		<span style="font-size:40px"></span>
@@ -1596,7 +1596,7 @@ void main( void )
 				// RENDERING in 3 steps
 				
 				// STEP 1
-				// Perform PathTracing and Render into rttPathTraceTexture
+				// Perform PathMarching and Render into rttPathTraceTexture
 				// Read previous rttScreenOutputTexture to use as a new starting point to blend with
 				rttPathTraceTexture.setSize( SCREEN_WIDTH * pixelRatio, SCREEN_HEIGHT * pixelRatio );
 				renderer.render( sceneRTT, rttCamera, rttPathTraceTexture );
