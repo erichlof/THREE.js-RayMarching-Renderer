@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 	<head>
-		<title>three.js PathMarching Renderer</title>
+		<title>three.js RayMarching Renderer</title>
 		<meta charset="utf-8">
 		<meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1">
 		<style>
@@ -49,7 +49,7 @@
 	<body>
 
 		<div id="container"></div>
-		<div id="info"> three.js PathMarching Renderer</div>
+		<div id="info"> three.js RayMarching Renderer</div>
 		
 		<div id="instructions">
 		<span style="font-size:40px"></span>
@@ -880,7 +880,7 @@ void main( void )
 	light02Color = uLightMatrix[2][0][3] * vec3( uLightMatrix[2][1][0], uLightMatrix[2][1][1], uLightMatrix[2][1][2] );
 	
 	
-	// perform path tracing (via RayMarching) and get resulting pixel color
+	// perform RayMarching and get resulting pixel color
 	vec3 pixelColor = getPixelColor(camUV, camPos, rayDir);
 	vec3 finalColor = vec3(0.0);
 	
@@ -1596,7 +1596,7 @@ void main( void )
 				// RENDERING in 3 steps
 				
 				// STEP 1
-				// Perform PathMarching and Render into rttPathTraceTexture
+				// Perform RayMarching and Render into rttPathTraceTexture
 				// Read previous rttScreenOutputTexture to use as a new starting point to blend with
 				rttPathTraceTexture.setSize( SCREEN_WIDTH * pixelRatio, SCREEN_HEIGHT * pixelRatio );
 				renderer.render( sceneRTT, rttCamera, rttPathTraceTexture );
